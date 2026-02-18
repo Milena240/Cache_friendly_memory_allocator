@@ -1,0 +1,1 @@
+/usr/bin/c++  -O3 -Wall CMakeFiles/unit_tests.dir/tests/unit_tests.cpp.o -o unit_tests  liballocator_lib.a 
