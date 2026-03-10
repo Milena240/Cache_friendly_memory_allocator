@@ -6,13 +6,13 @@ static void BM_SlabAllocFree(benchmark::State& state) {
     LockType lt = static_cast<LockType>(state.range(0));
     
     // Setup the allocator
-    SlabAllocator alloc(64, 10000, lt);
+    SlabAllocator alloc(8, 64, lt);
 
     // Using the classic while(state.KeepRunning()) loop
     while (state.KeepRunning()) {
-        void* p = alloc.alloc();
+        void* p = alloc.alloc(16);
         if (p) {
-            alloc.free(p);
+            alloc.free(p, 16);
         }
         // Force the compiler to actually perform the operation
         benchmark::DoNotOptimize(p);
