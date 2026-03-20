@@ -13,6 +13,7 @@ typedef struct ListNode {
     struct ListNode* next;
 } ListNode;
 
+
 typedef struct {
     ListNode storage[POOL_CAPACITY];
     int      top;          

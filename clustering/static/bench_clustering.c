@@ -326,6 +326,8 @@ static void bench_alloc_throughput(int size) {
  * ========================================================= */
 
 int main(void) {
+
+    printf("Size of ListNode %ld", sizeof(ListNode));
     printf("\n");
     printf("╔═══════════════════════════════════════════════════════════════════╗\n");
     printf("║          CLUSTERING BENCHMARK — Cache-Friendly Allocator          ║\n");

@@ -76,43 +76,33 @@ static double bench_list_traverse(DListNode* head) {
 }
 
 static double bench_alloc_list(DynamicListPool* p, int size) {
-    /* Measure a single fresh allocation of `size` nodes.
-     * We fully reset between reps so each rep starts from an
-     * empty pool — same condition as the scattered baseline
-     * which always starts from a fresh heap state. */
     double best = 1e18;
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
-        /* full reset so next alloc starts from zero */
+        /* fully free and restart so each rep is a fair fresh allocation,
+         * matching what bench_alloc_scattered does on the scattered side */
         dynamic_list_reset(p);
         memset(p, 0, sizeof(*p));
 
         double t0 = now_ms();
+        /* inline the alloc loop without the function call overhead of
+         * dlist_build_pooled so we measure only the allocation itself */
         DListNode* head = NULL, *tail = NULL;
-        DListChunk* cur_chunk = NULL;
-        int chunk_used = 0;
-
         for (int i = 0; i < size; i++) {
-            /* inline the fast path: bump inside current chunk */
-            if (!cur_chunk || chunk_used >= CHUNK_SIZE) {
+            if (!p->head || p->current->used >= CHUNK_SIZE) {
                 DListChunk* c = (DListChunk*)malloc(sizeof(DListChunk));
                 c->used = 0; c->next_chunk = NULL;
-                if (!p->head) p->head = c;
-                else          p->current->next_chunk = c;
-                p->current = c;
+                if (!p->head) { p->head = c; p->current = c; }
+                else { p->current->next_chunk = c; p->current = c; }
                 p->n_chunks++;
-                cur_chunk  = c;
-                chunk_used = 0;
             }
-            DListNode* n = &cur_chunk->storage[chunk_used++];
-            cur_chunk->used = chunk_used;
-            n->value = i; n->next = NULL;
-            p->total++;
+            DListNode* n = &p->current->storage[p->current->used++];
+            n->value = i; n->next = NULL; p->total++;
             if (!head) head = n; else tail->next = n;
             tail = n;
         }
         double t1 = now_ms();
         (void)head;
-        if (r >= WARMUP_REPS && (t1-t0) < best)
+        if (r >= WARMUP_REPS && (t1 - t0) < best)
             best = t1 - t0;
     }
     return best;
@@ -333,17 +323,12 @@ static void exp3_traversal(void) {
 
 static void exp4_alloc_throughput(void) {
     header("EXPERIMENT 4 — Allocation throughput");
-    printf("  Key metric: how many malloc() calls does each approach make?\n"
-           "  Dynamic pool: one malloc per %d nodes (one per chunk).\n"
-           "  Scattered:    one malloc per node.\n"
-           "  Fewer malloc calls = less lock contention in multi-threaded code,\n"
-           "  less allocator metadata overhead, less heap fragmentation.\n\n",
+    printf("  How much faster is dynamic_pool_alloc() vs malloc()?\n"
+           "  Pool makes one malloc per %d nodes instead of one per node.\n"
+           "  Pool avoids free-list searches, lock overhead, and metadata.\n"
+           "  Note: speedup depends on the system malloc implementation.\n"
+           "  The malloc() call count reduction is the portable guarantee.\n\n",
            CHUNK_SIZE);
-
-    printf("  %-10s  %-14s  %-14s  %-14s  %12s\n",
-           "Size", "Scattered(ms)", "DynPool(ms)", "malloc calls", "Call ratio");
-    printf("  %-10s  %-14s  %-14s  %-14s  %12s\n",
-           "────", "─────────────", "───────────", "────────────", "──────────");
 
     int bench_sizes[] = { 10000, 100000, 500000, 1000000 };
     int n_bench = 4;
@@ -358,15 +343,25 @@ static void exp4_alloc_throughput(void) {
         double t_scattered = bench_alloc_scattered(n);
         double t_dynamic   = bench_alloc_list(&dp, n);
 
-        /* malloc calls: scattered = n, dynamic = ceil(n / CHUNK_SIZE) */
+        double allocs_per_sec_scattered = (double)n / (t_scattered / 1000.0);
+        double allocs_per_sec_dynamic   = (double)n / (t_dynamic   / 1000.0);
+        double speedup = t_scattered / t_dynamic;
+
         int calls_scattered = n;
         int calls_dynamic   = (n + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-        printf("  %-10d  %-14.3f  %-14.3f  %6d → %-6d  %11.0fx fewer\n",
-               n,
-               t_scattered, t_dynamic,
+        printf("  Allocating %d nodes\n", n);
+        printf("  %-32s %10s %18s\n", "Method", "Time (ms)", "Allocs/second");
+        printf("  %-32s %10s %18s\n", "------", "---------", "-------------");
+        printf("  %-32s %10.3f %15.0f/s\n",
+               "malloc() per node",
+               t_scattered, allocs_per_sec_scattered);
+        printf("  %-32s %10.3f %15.0f/s  (%.1fx faster)\n",
+               "dynamic_pool_alloc()",
+               t_dynamic, allocs_per_sec_dynamic, speedup);
+        printf("  malloc() calls: %d → %d  (%dx fewer)\n\n",
                calls_scattered, calls_dynamic,
-               (double)calls_scattered / calls_dynamic);
+               calls_scattered / calls_dynamic);
 
         dynamic_list_reset(&dp);
         memset(&dp, 0, sizeof(dp));
@@ -374,11 +369,6 @@ static void exp4_alloc_throughput(void) {
     }
 
     dynamic_list_reset(&dp);
-
-    printf("\n  Note: wall-clock speedup depends heavily on the system malloc\n"
-           "  implementation. The malloc-call reduction is the portable\n"
-           "  advantage — it matters most under thread contention and\n"
-           "  when the allocator must request pages from the OS.\n");
 }
 
 
