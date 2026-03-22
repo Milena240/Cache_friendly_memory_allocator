@@ -14,7 +14,18 @@
  *                               nodes in traversal order.  Lower is better;
  *                               < 64 bytes means nodes share cache lines.
  *  4. Manual compaction demo  — take a scattered list, copy it into a pool
-
+ *                               in traversal order, measure the speedup.
+ *
+ * Compile
+ * ───────
+ *   gcc -O2 -o bench_clustering bench_clustering.c node_pool.c -lm
+ *
+ * Run
+ * ───
+ *   ./bench_clustering
+ *
+ * For hardware counter data (Linux only):
+ *   perf stat -e cache-misses,cache-references ./bench_clustering
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -127,59 +138,164 @@ static void bench_list_traversal(int size) {
 
 
 /* =========================================================
- * EXPERIMENT 2 — BST search
+ * EXPERIMENT 2 — BST traversal and search
  * ========================================================= */
 
-static void bench_tree_search(int size) {
+static double bench_tree_traversal(int size) {
     printf("\n  Tree size: %d nodes\n\n", size);
     printf("  %-28s %12s %12s %14s\n",
-           "Variant", "Time (ms)", "Speedup", "Avg stride");
+           "Variant", "Avg time(ms)", "Speedup", "Avg stride");
     printf("  %-28s %12s %12s %14s\n",
-           "-------", "---------", "-------", "----------");
+           "-------", "------------", "-------", "----------");
 
-    /* Search for every 7th value to stress pointer chasing */
-    int   n_searches = size / 7 + 1;
-    long  volatile sink = 0;
+    long volatile sink = 0;
 
-    double t_scattered_min = 1e18;
-    double t_pooled_min    = 1e18;
+    /* collect MEASURE_REPS timings and compute average */
+    double times_scattered[MEASURE_REPS];
+    double times_pooled   [MEASURE_REPS];
 
     /* ── Scattered ── */
     TreeNode* scattered_root = tree_build_scattered(size);
-    for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
+
+    /* warmup */
+    for (int r = 0; r < WARMUP_REPS; r++)
+        sink += tree_traverse_count(scattered_root);
+
+    /* measure — record every rep, compute average */
+    for (int r = 0; r < MEASURE_REPS; r++) {
         double t0 = now_ms();
-        for (int i = 0; i < n_searches; i++)
-            sink += tree_search(scattered_root, (i * 7) % size);
+        sink += tree_traverse_count(scattered_root);
         double t1 = now_ms();
-        if (r >= WARMUP_REPS)
-            if ((t1 - t0) < t_scattered_min) t_scattered_min = t1 - t0;
+        times_scattered[r] = t1 - t0;
     }
+
+    double sum_s = 0;
+    for (int r = 0; r < MEASURE_REPS; r++) sum_s += times_scattered[r];
+    double avg_scattered = sum_s / MEASURE_REPS;
+
     double stride_scattered = tree_avg_stride(scattered_root, size);
 
     /* ── Pooled ── */
     tree_pool_init(&g_tree_pool);
     TreeNode* pooled_root = tree_build_pooled(&g_tree_pool, size);
-    for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
+
+    for (int r = 0; r < WARMUP_REPS; r++)
+        sink += tree_traverse_count(pooled_root);
+
+    for (int r = 0; r < MEASURE_REPS; r++) {
+        double t0 = now_ms();
+        sink += tree_traverse_count(pooled_root);
+        double t1 = now_ms();
+        times_pooled[r] = t1 - t0;
+    }
+
+    double sum_p = 0;
+    for (int r = 0; r < MEASURE_REPS; r++) sum_p += times_pooled[r];
+    double avg_pooled = sum_p / MEASURE_REPS;
+
+    double stride_pooled = tree_avg_stride(pooled_root, size);
+    double speedup = avg_scattered / avg_pooled;
+
+    printf("  %-28s %12.3f %12s %11.1f B\n",
+           "Scattered (malloc/node)",
+           avg_scattered, "1.00x", stride_scattered);
+    printf("  %-28s %12.3f %11.2fx %11.1f B\n",
+           "Pooled (contiguous array)",
+           avg_pooled, speedup, stride_pooled);
+
+    /* show individual reps so variance is visible */
+    printf("\n  Individual rep times (ms) — shows consistency:\n");
+    printf("  %-28s", "Scattered:");
+    for (int r = 0; r < MEASURE_REPS; r++)
+        printf(" %6.3f", times_scattered[r]);
+    printf("\n");
+    printf("  %-28s", "Pooled:");
+    for (int r = 0; r < MEASURE_REPS; r++)
+        printf(" %6.3f", times_pooled[r]);
+    printf("\n");
+
+    tree_free_scattered(scattered_root);
+    (void)sink;
+    return speedup;   /* return so main can accumulate for average */
+}
+
+static double bench_tree_search(int size) {
+    printf("\n  Tree size: %d nodes\n\n", size);
+    printf("  %-28s %12s %12s %14s\n",
+           "Variant", "Avg time(ms)", "Speedup", "Avg stride");
+    printf("  %-28s %12s %12s %14s\n",
+           "-------", "------------", "-------", "----------");
+
+    /* Search for every 7th value to stress pointer chasing */
+    int   n_searches = size / 7 + 1;
+    long  volatile sink = 0;
+
+    double times_scattered[MEASURE_REPS];
+    double times_pooled   [MEASURE_REPS];
+
+    /* ── Scattered ── */
+    TreeNode* scattered_root = tree_build_scattered(size);
+
+    for (int r = 0; r < WARMUP_REPS; r++)
+        for (int i = 0; i < n_searches; i++)
+            sink += tree_search(scattered_root, (i * 7) % size);
+
+    for (int r = 0; r < MEASURE_REPS; r++) {
+        double t0 = now_ms();
+        for (int i = 0; i < n_searches; i++)
+            sink += tree_search(scattered_root, (i * 7) % size);
+        double t1 = now_ms();
+        times_scattered[r] = t1 - t0;
+    }
+
+    double sum_s = 0;
+    for (int r = 0; r < MEASURE_REPS; r++) sum_s += times_scattered[r];
+    double avg_scattered = sum_s / MEASURE_REPS;
+    double stride_scattered = tree_avg_stride(scattered_root, size);
+
+    /* ── Pooled ── */
+    tree_pool_init(&g_tree_pool);
+    TreeNode* pooled_root = tree_build_pooled(&g_tree_pool, size);
+
+    for (int r = 0; r < WARMUP_REPS; r++)
+        for (int i = 0; i < n_searches; i++)
+            sink += tree_search(pooled_root, (i * 7) % size);
+
+    for (int r = 0; r < MEASURE_REPS; r++) {
         double t0 = now_ms();
         for (int i = 0; i < n_searches; i++)
             sink += tree_search(pooled_root, (i * 7) % size);
         double t1 = now_ms();
-        if (r >= WARMUP_REPS)
-            if ((t1 - t0) < t_pooled_min) t_pooled_min = t1 - t0;
+        times_pooled[r] = t1 - t0;
     }
+
+    double sum_p = 0;
+    for (int r = 0; r < MEASURE_REPS; r++) sum_p += times_pooled[r];
+    double avg_pooled = sum_p / MEASURE_REPS;
     double stride_pooled = tree_avg_stride(pooled_root, size);
 
-    double speedup = t_scattered_min / t_pooled_min;
+    double speedup = avg_scattered / avg_pooled;
 
     printf("  %-28s %12.3f %12s %11.1f B\n",
            "Scattered (malloc/node)",
-           t_scattered_min, "1.00x", stride_scattered);
+           avg_scattered, "1.00x", stride_scattered);
     printf("  %-28s %12.3f %11.2fx %11.1f B\n",
            "Pooled (contiguous array)",
-           t_pooled_min, speedup, stride_pooled);
+           avg_pooled, speedup, stride_pooled);
+
+    printf("\n  Individual rep times (ms):\n");
+    printf("  %-28s", "Scattered:");
+    for (int r = 0; r < MEASURE_REPS; r++)
+        printf(" %6.3f", times_scattered[r]);
+    printf("\n");
+    printf("  %-28s", "Pooled:");
+    for (int r = 0; r < MEASURE_REPS; r++)
+        printf(" %6.3f", times_pooled[r]);
+    printf("\n");
 
     tree_free_scattered(scattered_root);
     (void)sink;
+    return speedup;
 }
 
 
@@ -326,8 +442,6 @@ static void bench_alloc_throughput(int size) {
  * ========================================================= */
 
 int main(void) {
-
-    printf("Size of ListNode %ld", sizeof(ListNode));
     printf("\n");
     printf("╔═══════════════════════════════════════════════════════════════════╗\n");
     printf("║          CLUSTERING BENCHMARK — Cache-Friendly Allocator          ║\n");
@@ -347,12 +461,26 @@ int main(void) {
     for (int i = 0; i < (int)(sizeof(LIST_SIZES)/sizeof(LIST_SIZES[0])); i++)
         bench_list_traversal(LIST_SIZES[i]);
 
-    /* ── Experiment 2: BST search ── */
-    print_header("EXPERIMENT 2 — Binary Search Tree Searches");
+    /* ── Experiment 2: BST traversal and search ── */
+    int n_tree_sizes = (int)(sizeof(TREE_SIZES)/sizeof(TREE_SIZES[0]));
+
+    double traversal_speedups[4];
+    double search_speedups   [4];
+
+    print_header("EXPERIMENT 2a — Binary Search Tree Traversal (count all nodes)");
+    printf("  Visits every node in the tree.\n"
+           "  Shows average time across %d runs so variance is visible.\n"
+           "  Pool-built trees have better spatial locality → fewer misses.\n",
+           MEASURE_REPS);
+    for (int i = 0; i < n_tree_sizes; i++)
+        traversal_speedups[i] = bench_tree_traversal(TREE_SIZES[i]);
+
+    print_header("EXPERIMENT 2b — Binary Search Tree Searches");
     printf("  Repeated lookups stress the pointer-chasing path.\n"
-           "  Pool-built trees have better spatial locality per level.\n");
-    for (int i = 0; i < (int)(sizeof(TREE_SIZES)/sizeof(TREE_SIZES[0])); i++)
-        bench_tree_search(TREE_SIZES[i]);
+           "  Shows average time across %d runs.\n",
+           MEASURE_REPS);
+    for (int i = 0; i < n_tree_sizes; i++)
+        search_speedups[i] = bench_tree_search(TREE_SIZES[i]);
 
     /* ── Experiment 3: Compaction ── */
     print_header("EXPERIMENT 3 — Manual Compaction (reorder demo)");
@@ -379,6 +507,42 @@ int main(void) {
     printf("                 cause actual DRAM fetches.\n\n");
     printf("  Compaction   — demonstrates why compacting GCs improve\n");
     printf("                 performance even without changing the algorithm.\n\n");
+
+    /* ── Tree average summary ── */
+    print_separator();
+    printf("\n  TREE POOL vs MALLOC — AVERAGE SPEEDUP SUMMARY\n\n");
+
+    printf("  %-12s  %14s  %14s\n",
+           "Tree size", "Traversal", "Search");
+    printf("  %-12s  %14s  %14s\n",
+           "─────────", "─────────", "──────");
+    for (int i = 0; i < n_tree_sizes; i++)
+        printf("  %-12d  %13.2fx  %13.2fx\n",
+               TREE_SIZES[i],
+               traversal_speedups[i],
+               search_speedups[i]);
+
+    /* compute averages */
+    double avg_traversal = 0, avg_search = 0;
+    for (int i = 0; i < n_tree_sizes; i++) {
+        avg_traversal += traversal_speedups[i];
+        avg_search    += search_speedups[i];
+    }
+    avg_traversal /= n_tree_sizes;
+    avg_search    /= n_tree_sizes;
+
+    printf("  %-12s  %14s  %14s\n",
+           "─────────", "─────────", "──────────");
+    printf("  %-12s  %13.2fx  %13.2fx\n",
+           "AVERAGE", avg_traversal, avg_search);
+
+    printf("\n  Pool allocator is on average %.2fx faster than malloc\n"
+           "  for tree traversal and %.2fx faster for tree search.\n\n",
+           avg_traversal, avg_search);
+
+    printf("  Why traversal speedup > search speedup:\n"
+           "  Traversal visits every node in order → pool locality helps.\n"
+           "  Search jumps to random positions → both layouts miss similarly.\n\n");
 
     return 0;
 }
