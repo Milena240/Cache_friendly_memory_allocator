@@ -1,11 +1,12 @@
+#ifndef DYNAMIC_POOL_C
+#define DYNAMIC_POOL_C
+
 #include "dynamic_pool.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 
-
-/* ── Internal: allocate a fresh empty chunk ────────────── */
 
 static DListChunk* new_list_chunk(void) {
     DListChunk* c = (DListChunk*)malloc(sizeof(DListChunk));
@@ -29,9 +30,6 @@ static DTreeChunk* new_tree_chunk(void) {
     return c;
 }
 
-
-/* ── DynamicListPool ──────────────────────────────────── */
-
 void dynamic_list_init(DynamicListPool* p) {
     DListChunk* first = new_list_chunk();
     p->head      = first;
@@ -41,7 +39,6 @@ void dynamic_list_init(DynamicListPool* p) {
 }
 
 DListNode* dynamic_list_alloc(DynamicListPool* p, int value) {
-    /* if current chunk is full, chain a new one */
     if (p->current->used >= CHUNK_SIZE) {
         DListChunk* chunk      = new_list_chunk();
         p->current->next_chunk = chunk;   /* link old → new */
@@ -49,9 +46,6 @@ DListNode* dynamic_list_alloc(DynamicListPool* p, int value) {
         p->n_chunks++;
     }
 
-    /* hand out the next slot in the current chunk —
-     * this is the same O(1) bump-pointer operation as
-     * the fixed pool, just scoped to one chunk at a time */
     DListNode* n = &p->current->storage[p->current->used++];
     n->value = value;
     n->next  = NULL;
@@ -60,8 +54,7 @@ DListNode* dynamic_list_alloc(DynamicListPool* p, int value) {
 }
 
 void dynamic_list_reset(DynamicListPool* p) {
-    /* walk the chunk chain and free every chunk */
-    if (!p->head) return;   /* safe to call on uninitialized or already-reset pool */
+    if (!p->head) return;  
     DListChunk* chunk = p->head;
     while (chunk) {
         DListChunk* next = chunk->next_chunk;
@@ -74,8 +67,6 @@ void dynamic_list_reset(DynamicListPool* p) {
     p->n_chunks = 0;
 }
 
-
-/* ── DynamicTreePool ──────────────────────────────────── */
 
 void dynamic_tree_init(DynamicTreePool* p) {
     DTreeChunk* first = new_tree_chunk();
@@ -114,11 +105,8 @@ void dynamic_tree_reset(DynamicTreePool* p) {
     p->n_chunks = 0;
 }
 
-
-/* ── List builders ────────────────────────────────────── */
-
 DListNode* dlist_build_pooled(DynamicListPool* p, int size) {
-    p->head = NULL;   /* safe for reset even if never initialized */
+    p->head = NULL;  
     dynamic_list_reset(p);
     dynamic_list_init(p);
 
@@ -156,10 +144,6 @@ void dlist_free_scattered(DListNode* head) {
 }
 
 
-/* ── Tree builders ────────────────────────────────────── */
-
-/* Iterative balanced BST builder using an explicit stack.
- * Avoids deep recursion that causes stack overflow at large sizes. */
 typedef struct { int lo; int hi; DTreeNode** slot; } BTask;
 
 DTreeNode* dtree_build_pooled(DynamicTreePool* p, int size) {
@@ -302,3 +286,6 @@ void print_pool_stats(const char* label, PoolStats s) {
            s.bytes_used      / 1024,
            s.utilization * 100.0);
 }
+
+#endif /* DYNAMIC_POOL_C */
+

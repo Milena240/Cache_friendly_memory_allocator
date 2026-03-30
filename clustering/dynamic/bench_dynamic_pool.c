@@ -1,40 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
 
-/*
- * bench_dynamic_pool.c  —  Dynamic chunk pool benchmark
- *
- * Answers three questions:
- *
- *  1. MEMORY WASTE  — how much memory does each allocator
- *                     actually use vs actually need?
- *                     Fixed pool: always 16 MB.
- *                     Dynamic pool: scales with usage.
- *                     Scattered malloc: per-node overhead.
- *
- *  2. LOCALITY      — does the chunk boundary hurt locality
- *                     vs the fixed pool? How does chunk size
- *                     affect the stride?
- *
- *  3. PERFORMANCE   — traversal speed: dynamic pool vs fixed
- *                     pool vs scattered malloc.
- *                     The dynamic pool should be close to the
- *                     fixed pool but use far less memory.
- *
- * Compile:
- *   gcc -O2 -o bench_dynamic_pool bench_dynamic_pool.c dynamic_pool.c -lm
- *
- * Run:
- *   ./bench_dynamic_pool
- */
-
 #include "dynamic_pool.h"
 
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
-/* ── Timing ──────────────────────────────────────────── */
+#define WARMUP_REPS   3
+#define MEASURE_REPS  10
 
 static double now_ms(void) {
     struct timespec ts;
@@ -42,15 +17,8 @@ static double now_ms(void) {
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
 
-/* ── Config ──────────────────────────────────────────── */
-
-#define WARMUP_REPS   3
-#define MEASURE_REPS  10
-
 static const int SIZES[] = { 4, 100, 10000, 100000, 500000, 1000000 };
 #define N_SIZES (int)(sizeof(SIZES)/sizeof(SIZES[0]))
-
-/* ── Helpers ─────────────────────────────────────────── */
 
 static void separator(void) {
     printf("─────────────────────────────────────────────────────────────────────\n");
@@ -78,14 +46,10 @@ static double bench_list_traverse(DListNode* head) {
 static double bench_alloc_list(DynamicListPool* p, int size) {
     double best = 1e18;
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
-        /* fully free and restart so each rep is a fair fresh allocation,
-         * matching what bench_alloc_scattered does on the scattered side */
         dynamic_list_reset(p);
         memset(p, 0, sizeof(*p));
 
         double t0 = now_ms();
-        /* inline the alloc loop without the function call overhead of
-         * dlist_build_pooled so we measure only the allocation itself */
         DListNode* head = NULL, *tail = NULL;
         for (int i = 0; i < size; i++) {
             if (!p->head || p->current->used >= CHUNK_SIZE) {
@@ -121,26 +85,12 @@ static double bench_alloc_scattered(int size) {
     return best;
 }
 
-
-/* =========================================================
- * EXPERIMENT 1 — Memory usage
- *
- * The core motivation for the dynamic pool.
- * Shows exactly how many bytes each approach uses
- * for different list sizes.
- *
- * Fixed pool: 16 MB always (POOL_CAPACITY × sizeof(ListNode))
- * Dynamic pool: n_chunks × sizeof(DListChunk)
- * Scattered: n × sizeof(DListNode) + malloc overhead (~32B/node)
- * ========================================================= */
-
 static void exp1_memory_usage(void) {
     header("EXPERIMENT 1 — Memory usage per list size");
     printf("  Fixed pool reserves 16 MB regardless of list size.\n"
            "  Dynamic pool allocates only what is needed.\n"
            "  Scattered malloc adds ~32 bytes overhead per node.\n\n");
 
-    /* fixed pool constant */
     size_t fixed_pool_bytes = (size_t)(1 << 20) * sizeof(DListNode);
 
     printf("  %-10s  %12s  %12s  %16s  %10s\n",
@@ -153,17 +103,11 @@ static void exp1_memory_usage(void) {
     for (int si = 0; si < N_SIZES; si++) {
         int n = SIZES[si];
 
-        /* dynamic pool */
         dlist_build_pooled(&p, n);
         PoolStats ps = dynamic_list_stats(&p);
 
-        /* scattered: each node is malloc'd individually.
-         * glibc malloc adds a 16-byte header per allocation
-         * and rounds up to 32-byte alignment, so minimum
-         * cost per node is sizeof(DListNode) + 16 bytes. */
         size_t scattered_bytes = (size_t)n * (sizeof(DListNode) + 16);
 
-        /* how much memory the dynamic pool saves vs fixed */
         double saving_pct = 100.0 * (1.0 - (double)ps.bytes_allocated
                                          / (double)fixed_pool_bytes);
 
@@ -197,21 +141,6 @@ static void exp1_memory_usage(void) {
 }
 
 
-/* =========================================================
- * EXPERIMENT 2 — Locality: chunk boundary effect
- *
- * The dynamic pool has perfect locality WITHIN a chunk
- * (nodes are contiguous). But at chunk boundaries there
- * is a gap — chunk[1] might be far from chunk[0] in memory.
- *
- * We measure average stride for three variants:
- *   - Scattered malloc  (worst)
- *   - Dynamic pool      (medium — gaps at boundaries)
- *   - Fixed pool        (best — fully contiguous)
- *
- * And we show how CHUNK_SIZE affects the stride.
- * ========================================================= */
-
 static void exp2_locality(void) {
     header("EXPERIMENT 2 — Spatial locality (avg stride between nodes)");
     printf("  Lower stride = nodes closer together = fewer cache misses.\n"
@@ -220,11 +149,9 @@ static void exp2_locality(void) {
 
     int n = 100000;
 
-    /* scattered */
     DListNode* scattered = dlist_build_scattered(n);
     double stride_scattered = dlist_avg_stride(scattered);
 
-    /* dynamic pool */
     DynamicListPool dp;
     memset(&dp, 0, sizeof(dp));
     DListNode* dpooled = dlist_build_pooled(&dp, n);
@@ -261,17 +188,6 @@ static void exp2_locality(void) {
 }
 
 
-/* =========================================================
- * EXPERIMENT 3 — Traversal performance
- *
- * Does the chunk boundary gap matter in practice?
- * Compare traversal time: scattered vs dynamic vs fixed pool.
- *
- * We simulate the fixed pool using the dynamic pool with a
- * very large chunk size (all nodes in one chunk) so the
- * comparison is fair.
- * ========================================================= */
-
 static void exp3_traversal(void) {
     header("EXPERIMENT 3 — Traversal performance");
     printf("  Dynamic pool should be close to scattered for small sizes\n"
@@ -283,7 +199,6 @@ static void exp3_traversal(void) {
     printf("  %-10s  %-20s  %-20s  %10s\n",
            "────", "──────────────", "─────────────────", "───────");
 
-    /* only test meaningful sizes — skip 4 and 100 */
     int bench_sizes[] = { 10000, 100000, 500000, 1000000 };
     int n_bench = 4;
 
@@ -312,14 +227,6 @@ static void exp3_traversal(void) {
     dynamic_list_reset(&dp);
 }
 
-
-/* =========================================================
- * EXPERIMENT 4 — Allocation throughput
- *
- * Dynamic pool vs scattered malloc.
- * Dynamic pool calls malloc once per CHUNK_SIZE nodes,
- * so it should be significantly faster.
- * ========================================================= */
 
 static void exp4_alloc_throughput(void) {
     header("EXPERIMENT 4 — Allocation throughput");
@@ -371,11 +278,6 @@ static void exp4_alloc_throughput(void) {
     dynamic_list_reset(&dp);
 }
 
-
-/* =========================================================
- * main
- * ========================================================= */
-
 int main(void) {
     printf("\n");
     printf("╔═══════════════════════════════════════════════════════════════════╗\n");
@@ -408,3 +310,5 @@ int main(void) {
 
     return 0;
 }
+
+

@@ -1,19 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
-
-/*
- * bench_array_tree.c  —  Cache-friendly array tree benchmark
- *
- * Compares:
- *   ArrayTree   — flat array, index arithmetic, no pointers
- *   PointerTree — pool-allocated BST with left/right pointers
- *
- * Compile:
- *   gcc -O2 -o bench_array_tree bench_array_tree.c array_tree.c -lm
- *
- * Run:
- *   ./bench_array_tree
- */
-
 #include "array_tree.h"
 
 #include <stdio.h>
@@ -22,27 +6,27 @@
 #include <time.h>
 #include <limits.h>
 
-/* ── Timing ──────────────────────────────────────────── */
+#define _POSIX_C_SOURCE 200809L
+#define WARMUP_REPS   3
+#define MEASURE_REPS  10
 
-static double now_ms(void) {
+static double now_ms(void)
+{
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
 
-#define WARMUP_REPS   3
-#define MEASURE_REPS  10
-
 static void separator(void) {
     printf("─────────────────────────────────────────────────────────────────────\n");
 }
+
 static void header(const char* t) {
     separator();
     printf("  %s\n", t);
     separator();
 }
 
-/* run MEASURE_REPS timed runs, return average time in ms */
 #define BENCH_AVG(result_avg, code)                              \
     do {                                                         \
         long volatile _sink = 0;                                 \
@@ -57,21 +41,16 @@ static void header(const char* t) {
         (void)_sink;                                             \
     } while(0)
 
-/* test sizes */
 static const int SIZES[] = { 10000, 50000, 100000, 500000 };
 #define N_SIZES (int)(sizeof(SIZES)/sizeof(SIZES[0]))
 
-/* capacity must be 2^k - 1 for a complete binary tree.
- * We pick the smallest power-of-two-minus-one >= size. */
 static int tree_capacity(int size) {
     int cap = 1;
-    while (cap < size * 3)   /* 3x to leave room for BST spread */
-        cap = cap * 2 + 1;   /* 1, 3, 7, 15, 31, 63 ... 2^k-1  */
+    while (cap < size * 3)   
+        cap = cap * 2 + 1;   
     return cap;
 }
 
-/* generate a shuffled sequence so insertions don't
- * degenerate the BST into a linked list */
 static void shuffle(int* arr, int n) {
     for (int i = n-1; i > 0; i--) {
         int j   = rand() % (i+1);
@@ -80,11 +59,6 @@ static void shuffle(int* arr, int n) {
         arr[j]  = tmp;
     }
 }
-
-
-/* =========================================================
- * EXPERIMENT 1 — Memory layout
- * ========================================================= */
 
 static void exp1_layout(void) {
     header("EXPERIMENT 1 — Memory layout");
@@ -99,14 +73,6 @@ static void exp1_layout(void) {
     atree_destroy(&at);
     ptree_destroy(&pt);
 }
-
-
-/* =========================================================
- * EXPERIMENT 2 — Traversal (visit every node)
- *
- * ArrayTree:   linear scan of flat array — sequential
- * PointerTree: recursive in-order — pointer chasing
- * ========================================================= */
 
 static void exp2_traversal(void) {
     header("EXPERIMENT 2 — Traversal performance (visit every node)");
@@ -125,7 +91,6 @@ static void exp2_traversal(void) {
         int n   = SIZES[si];
         int cap = tree_capacity(n);
 
-        /* build both trees with same shuffled values */
         int* vals = (int*)malloc(sizeof(int) * (size_t)n);
         for (int i = 0; i < n; i++) vals[i] = i + 1;
         shuffle(vals, n);
@@ -152,22 +117,12 @@ static void exp2_traversal(void) {
         ptree_destroy(&pt);
     }
 
-    /* average speedup */
     double avg = 0;
     for (int i = 0; i < N_SIZES; i++) avg += speedups[i];
     avg /= N_SIZES;
     printf("\n  Average traversal speedup (ArrayTree vs PointerTree): %.2fx\n\n",
            avg);
 }
-
-
-/* =========================================================
- * EXPERIMENT 3 — Search performance
- *
- * Search for N/7 values in each tree.
- * ArrayTree:   index arithmetic navigation
- * PointerTree: pointer dereference navigation
- * ========================================================= */
 
 static void exp3_search(void) {
     header("EXPERIMENT 3 — Search performance");
@@ -231,11 +186,6 @@ static void exp3_search(void) {
            avg);
 }
 
-
-/* =========================================================
- * EXPERIMENT 4 — Insert performance
- * ========================================================= */
-
 static void exp4_insert(void) {
     header("EXPERIMENT 4 — Insert performance");
     printf("  Insert N values one by one.\n"
@@ -292,11 +242,6 @@ static void exp4_insert(void) {
            avg);
 }
 
-
-/* =========================================================
- * EXPERIMENT 5 — Overall summary
- * ========================================================= */
-
 static void exp5_summary(void) {
     header("EXPERIMENT 5 — Cache line utilization");
     printf("  How many values fit in one 64-byte cache line?\n\n");
@@ -322,12 +267,8 @@ static void exp5_summary(void) {
 }
 
 
-/* =========================================================
- * main
- * ========================================================= */
-
 int main(void) {
-    srand(42);   /* fixed seed for reproducibility */
+    srand(42);  
 
     printf("\n");
     printf("╔═══════════════════════════════════════════════════════════════════╗\n");
@@ -363,3 +304,4 @@ int main(void) {
 
     return 0;
 }
+

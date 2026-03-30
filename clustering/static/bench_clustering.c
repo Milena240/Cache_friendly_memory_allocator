@@ -1,33 +1,3 @@
-/*
- * bench_clustering.c  —  Clustering benchmark
- *
- * Compares scattered (malloc per node) vs pooled (contiguous array)
- * allocation for linked lists and binary search trees.
- *
- * What we measure
- * ───────────────
- *  1. Traversal time          — tight loop that sums / counts all nodes.
- *                               This is dominated by cache-miss latency
- *                               when nodes are scattered.
- *  2. Search time             — repeated BST lookups (pointer chasing).
- *  3. Average node stride     — mean byte-distance between consecutive
- *                               nodes in traversal order.  Lower is better;
- *                               < 64 bytes means nodes share cache lines.
- *  4. Manual compaction demo  — take a scattered list, copy it into a pool
- *                               in traversal order, measure the speedup.
- *
- * Compile
- * ───────
- *   gcc -O2 -o bench_clustering bench_clustering.c node_pool.c -lm
- *
- * Run
- * ───
- *   ./bench_clustering
- *
- * For hardware counter data (Linux only):
- *   perf stat -e cache-misses,cache-references ./bench_clustering
- */
-
 #define _POSIX_C_SOURCE 200809L
 
 #include "node_pool.h"
@@ -38,15 +8,11 @@
 #include <time.h>
 #include <math.h>
 
-/* ── Timing helper ───────────────────────────────────── */
-
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
-
-/* ── Print helpers ───────────────────────────────────── */
 
 static void print_separator(void) {
     printf("─────────────────────────────────────────────────────────────────────\n");
@@ -58,21 +24,14 @@ static void print_header(const char* title) {
     print_separator();
 }
 
-/* ── Global pools (static so they live on BSS, not stack) ─ */
 static ListPool g_list_pool;
 static TreePool g_tree_pool;
 
-/* ── Experiment parameters ───────────────────────────── */
 #define WARMUP_REPS    3
 #define MEASURE_REPS  10   /* repeat each timed section, take the minimum */
 
-/* Sizes to test */
 static const int LIST_SIZES[] = { 10000, 100000, 500000, 1000000 };
 static const int TREE_SIZES[] = { 10000, 100000, 500000, 1000000 };
-
-/* =========================================================
- * EXPERIMENT 1 — Linked list traversal
- * ========================================================= */
 
 static void bench_list_traversal(int size) {
     printf("\n  List size: %d nodes\n\n", size);
@@ -85,7 +44,6 @@ static void bench_list_traversal(int size) {
     double t_pooled_min    = 1e18;
     long   volatile sink   = 0;   /* prevent dead-code elimination */
 
-    /* ── Scattered ── */
     ListNode* scattered_head = NULL;
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
         if (scattered_head) list_free_scattered(scattered_head);
@@ -100,7 +58,6 @@ static void bench_list_traversal(int size) {
     }
     double stride_scattered = list_avg_stride(scattered_head);
 
-    /* ── Pooled ── */
     list_pool_init(&g_list_pool);
     ListNode* pooled_head = NULL;
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
@@ -124,7 +81,6 @@ static void bench_list_traversal(int size) {
            "Pooled (contiguous array)",
            t_pooled_min, speedup, stride_pooled);
 
-    /* Cache-line intuition */
     int nodes_per_cl_scattered = (stride_scattered > 0)
         ? (int)(64.0 / stride_scattered + 0.5) : 1;
     int nodes_per_cl_pooled = (int)(64.0 / sizeof(ListNode));
@@ -136,11 +92,6 @@ static void bench_list_traversal(int size) {
     (void)sink;
 }
 
-
-/* =========================================================
- * EXPERIMENT 2 — BST traversal and search
- * ========================================================= */
-
 static double bench_tree_traversal(int size) {
     printf("\n  Tree size: %d nodes\n\n", size);
     printf("  %-28s %12s %12s %14s\n",
@@ -150,18 +101,14 @@ static double bench_tree_traversal(int size) {
 
     long volatile sink = 0;
 
-    /* collect MEASURE_REPS timings and compute average */
     double times_scattered[MEASURE_REPS];
     double times_pooled   [MEASURE_REPS];
 
-    /* ── Scattered ── */
     TreeNode* scattered_root = tree_build_scattered(size);
 
-    /* warmup */
     for (int r = 0; r < WARMUP_REPS; r++)
         sink += tree_traverse_count(scattered_root);
 
-    /* measure — record every rep, compute average */
     for (int r = 0; r < MEASURE_REPS; r++) {
         double t0 = now_ms();
         sink += tree_traverse_count(scattered_root);
@@ -175,7 +122,6 @@ static double bench_tree_traversal(int size) {
 
     double stride_scattered = tree_avg_stride(scattered_root, size);
 
-    /* ── Pooled ── */
     tree_pool_init(&g_tree_pool);
     TreeNode* pooled_root = tree_build_pooled(&g_tree_pool, size);
 
@@ -203,7 +149,6 @@ static double bench_tree_traversal(int size) {
            "Pooled (contiguous array)",
            avg_pooled, speedup, stride_pooled);
 
-    /* show individual reps so variance is visible */
     printf("\n  Individual rep times (ms) — shows consistency:\n");
     printf("  %-28s", "Scattered:");
     for (int r = 0; r < MEASURE_REPS; r++)
@@ -226,14 +171,12 @@ static double bench_tree_search(int size) {
     printf("  %-28s %12s %12s %14s\n",
            "-------", "------------", "-------", "----------");
 
-    /* Search for every 7th value to stress pointer chasing */
     int   n_searches = size / 7 + 1;
     long  volatile sink = 0;
 
     double times_scattered[MEASURE_REPS];
     double times_pooled   [MEASURE_REPS];
 
-    /* ── Scattered ── */
     TreeNode* scattered_root = tree_build_scattered(size);
 
     for (int r = 0; r < WARMUP_REPS; r++)
@@ -253,7 +196,6 @@ static double bench_tree_search(int size) {
     double avg_scattered = sum_s / MEASURE_REPS;
     double stride_scattered = tree_avg_stride(scattered_root, size);
 
-    /* ── Pooled ── */
     tree_pool_init(&g_tree_pool);
     TreeNode* pooled_root = tree_build_pooled(&g_tree_pool, size);
 
@@ -298,23 +240,6 @@ static double bench_tree_search(int size) {
     return speedup;
 }
 
-
-/* =========================================================
- * EXPERIMENT 3 — Manual compaction (reorder demo)
- *
- * Shows the core idea behind compacting GC:
- *   1. Build a scattered list (simulates a list that grew
- *      over time with random malloc calls).
- *   2. Measure traversal time — slow due to scattered nodes.
- *   3. Compact: copy all nodes into a pool in traversal order.
- *   4. Measure traversal time again — now fast.
- *
- * This is what a compacting GC does automatically.
- * We do it manually to demonstrate the benefit cleanly.
- * ========================================================= */
-
-/* Copy a scattered list into a pool, in traversal order.
- * Returns the new head (all nodes now contiguous). */
 static ListNode* compact_list(ListNode* head, ListPool* pool) {
     list_pool_reset(pool);
     ListNode* new_head = NULL;
@@ -338,10 +263,8 @@ static void bench_compaction(int size) {
 
     long volatile sink = 0;
 
-    /* Build scattered list (simulate a list built over time) */
     ListNode* scattered = list_build_scattered(size);
 
-    /* Measure scattered traversal */
     double t_before_min = 1e18;
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
         double t0 = now_ms();
@@ -351,11 +274,9 @@ static void bench_compaction(int size) {
             if ((t1 - t0) < t_before_min) t_before_min = t1 - t0;
     }
 
-    /* Compact: copy into pool in traversal order */
     list_pool_init(&g_list_pool);
     ListNode* compacted = compact_list(scattered, &g_list_pool);
 
-    /* Measure compacted traversal */
     double t_after_min = 1e18;
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
         double t0 = now_ms();
@@ -382,12 +303,6 @@ static void bench_compaction(int size) {
 }
 
 
-/* =========================================================
- * EXPERIMENT 4 — Allocation throughput
- *
- * How fast is pool_alloc vs malloc?
- * ========================================================= */
-
 static void bench_alloc_throughput(int size) {
     printf("\n  Allocating %d nodes\n\n", size);
     printf("  %-28s %12s %18s\n",
@@ -398,7 +313,6 @@ static void bench_alloc_throughput(int size) {
     double t_malloc_min = 1e18;
     double t_pool_min   = 1e18;
 
-    /* malloc */
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
         ListNode* head = NULL, *tail = NULL;
         double t0 = now_ms();
@@ -414,7 +328,6 @@ static void bench_alloc_throughput(int size) {
         list_free_scattered(head);
     }
 
-    /* pool */
     list_pool_init(&g_list_pool);
     for (int r = 0; r < WARMUP_REPS + MEASURE_REPS; r++) {
         list_pool_reset(&g_list_pool);
@@ -437,10 +350,6 @@ static void bench_alloc_throughput(int size) {
 }
 
 
-/* =========================================================
- * main
- * ========================================================= */
-
 int main(void) {
     printf("\n");
     printf("╔═══════════════════════════════════════════════════════════════════╗\n");
@@ -453,7 +362,6 @@ int main(void) {
     printf("  Nodes per cache line (list): %zu\n", 64 / sizeof(ListNode));
     printf("  Nodes per cache line (tree): %zu\n\n", 64 / sizeof(TreeNode));
 
-    /* ── Experiment 1: List traversal ── */
     print_header("EXPERIMENT 1 — Linked List Traversal (sum all values)");
     printf("  Measures pointer-chasing performance.\n"
            "  Scattered nodes → each step is likely a cache miss.\n"
@@ -461,7 +369,6 @@ int main(void) {
     for (int i = 0; i < (int)(sizeof(LIST_SIZES)/sizeof(LIST_SIZES[0])); i++)
         bench_list_traversal(LIST_SIZES[i]);
 
-    /* ── Experiment 2: BST traversal and search ── */
     int n_tree_sizes = (int)(sizeof(TREE_SIZES)/sizeof(TREE_SIZES[0]));
 
     double traversal_speedups[4];
@@ -482,7 +389,6 @@ int main(void) {
     for (int i = 0; i < n_tree_sizes; i++)
         search_speedups[i] = bench_tree_search(TREE_SIZES[i]);
 
-    /* ── Experiment 3: Compaction ── */
     print_header("EXPERIMENT 3 — Manual Compaction (reorder demo)");
     printf("  Simulates what a compacting GC does:\n"
            "  takes a scattered list built with malloc, copies it\n"
@@ -490,7 +396,6 @@ int main(void) {
     bench_compaction(500000);
     bench_compaction(1000000);
 
-    /* ── Experiment 4: Allocation throughput ── */
     print_header("EXPERIMENT 4 — Allocation Throughput");
     printf("  How much faster is pool_alloc() vs malloc()?\n"
            "  Pool avoids syscalls, free-list searches, and metadata.\n");
@@ -508,7 +413,6 @@ int main(void) {
     printf("  Compaction   — demonstrates why compacting GCs improve\n");
     printf("                 performance even without changing the algorithm.\n\n");
 
-    /* ── Tree average summary ── */
     print_separator();
     printf("\n  TREE POOL vs MALLOC — AVERAGE SPEEDUP SUMMARY\n\n");
 
@@ -522,7 +426,6 @@ int main(void) {
                traversal_speedups[i],
                search_speedups[i]);
 
-    /* compute averages */
     double avg_traversal = 0, avg_search = 0;
     for (int i = 0; i < n_tree_sizes; i++) {
         avg_traversal += traversal_speedups[i];
@@ -546,3 +449,5 @@ int main(void) {
 
     return 0;
 }
+
+

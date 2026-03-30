@@ -1,3 +1,6 @@
+#ifndef NODE_POOL_C
+#define NODE_POOL_C
+
 #include "node_pool.h"
 
 #include <stdlib.h>
@@ -5,7 +8,6 @@
 #include <stdio.h>
 #include <stdint.h>
 
-/* ── ListPool ─────────────────────────────────────────── */
 
 void list_pool_init(ListPool* p) {
     p->top      = 0;
@@ -28,8 +30,6 @@ void list_pool_reset(ListPool* p) {
 }
 
 
-/* ── TreePool ─────────────────────────────────────────── */
-
 void tree_pool_init(TreePool* p) {
     p->top      = 0;
     p->capacity = POOL_CAPACITY;
@@ -50,9 +50,6 @@ TreeNode* tree_pool_alloc(TreePool* p, int value) {
 void tree_pool_reset(TreePool* p) {
     p->top = 0;
 }
-
-
-/* ── Scattered list builders ──────────────────────────── */
 
 ListNode* list_build_scattered(int size) {
     ListNode* head = NULL;
@@ -88,9 +85,6 @@ ListNode* list_build_pooled(ListPool* pool, int size) {
     }
     return head;
 }
-
-
-/* ── Scattered BST builders ───────────────────────────── */
 
 static TreeNode* _build_balanced_scattered(int lo, int hi) {
     if (lo > hi) return NULL;
@@ -131,9 +125,6 @@ TreeNode* tree_build_pooled(TreePool* pool, int size) {
     return _build_balanced_pooled(pool, 0, size - 1);
 }
 
-
-/* ── Workloads ────────────────────────────────────────── */
-
 long list_traverse_sum(ListNode* head) {
     long sum = 0;
     while (head) {
@@ -159,9 +150,6 @@ int tree_search(TreeNode* root, int value) {
     return 0;
 }
 
-
-/* ── Spatial locality metrics ─────────────────────────── */
-
 double list_avg_stride(ListNode* head) {
     if (!head || !head->next) return 0.0;
     long long total = 0;
@@ -179,12 +167,8 @@ double list_avg_stride(ListNode* head) {
 }
 
 double tree_avg_stride(TreeNode* root, int size) {
-    /* Collect all node addresses via in-order traversal,
-     * then compute average absolute distance between
-     * consecutive addresses in traversal order. */
     if (!root || size <= 1) return 0.0;
 
-    /* Use an explicit stack to avoid deep recursion */
     TreeNode** stack = (TreeNode**)malloc(sizeof(TreeNode*) * (size_t)(size + 64));
     uintptr_t* addrs = (uintptr_t*)malloc(sizeof(uintptr_t) * (size_t)size);
     int        sp    = 0;
@@ -210,3 +194,7 @@ double tree_avg_stride(TreeNode* root, int size) {
 
     return (double)total / (double)(ai - 1);
 }
+
+#endif /* NODE_POOL_C */
+
+

@@ -1,3 +1,6 @@
+#ifndef ARRAY_TREE_C
+#define ARRAY_TREE_C
+
 #include "array_tree.h"
 
 #include <stdlib.h>
@@ -5,70 +8,63 @@
 #include <stdio.h>
 #include <limits.h>
 
-/* =========================================================
- * array_tree.c  —  Implementation
- * ========================================================= */
-
-
-/* ── ArrayTree ───────────────────────────────────────────*/
-
-void atree_init(ArrayTree* t, int capacity) {
+void
+atree_init(ArrayTree* t, int capacity)
+{
     t->data     = (int32_t*)malloc(sizeof(int32_t) * (size_t)capacity);
     t->capacity = capacity;
     t->size     = 0;
-    /* fill every slot with the empty sentinel */
     for (int i = 0; i < capacity; i++)
         t->data[i] = EMPTY_SLOT;
 }
 
-void atree_destroy(ArrayTree* t) {
+void
+atree_destroy(ArrayTree* t)
+{
     free(t->data);
     t->data     = NULL;
     t->capacity = 0;
     t->size     = 0;
 }
 
-void atree_clear(ArrayTree* t) {
+void 
+atree_clear(ArrayTree* t)
+{
     for (int i = 0; i < t->capacity; i++)
         t->data[i] = EMPTY_SLOT;
     t->size = 0;
 }
 
-/* insert: walk the tree using index arithmetic.
- * At each step, go left if value < current, right if value >.
- * When an empty slot is found, place the value there.
- * This maintains BST property without touching any pointer. */
-void atree_insert(ArrayTree* t, int value) {
-    int i = 0;   /* start at root — always index 0 */
+void
+atree_insert(ArrayTree* t, int value)
+{
+    int i = 0;  
 
     while (i < t->capacity) {
         if (t->data[i] == EMPTY_SLOT) {
-            /* empty slot — place value here */
             t->data[i] = value;
             t->size++;
             return;
         }
         if (value < t->data[i])
-            i = atree_left(i);    /* go left:  2*i + 1 */
+            i = atree_left(i);   
         else if (value > t->data[i])
-            i = atree_right(i);   /* go right: 2*i + 2 */
+            i = atree_right(i);  
         else
-            return;               /* duplicate — ignore */
+            return;              
     }
-    /* capacity exceeded — tree is full */
 }
 
-/* search: same index arithmetic, no pointer follow.
- * The CPU can calculate 2*i+1 or 2*i+2 before the
- * current cache line is even fully loaded. */
-int atree_search(ArrayTree* t, int value) {
+int 
+atree_search(ArrayTree* t, int value)
+{
     int i = 0;
 
     while (i < t->capacity) {
         if (t->data[i] == EMPTY_SLOT)
-            return 0;             /* not found */
+            return 0;             
         if (value == t->data[i])
-            return 1;             /* found */
+            return 1;            
         if (value < t->data[i])
             i = atree_left(i);
         else
@@ -77,10 +73,9 @@ int atree_search(ArrayTree* t, int value) {
     return 0;
 }
 
-/* traverse: just scan the array linearly.
- * Skip empty slots, sum all real values.
- * This is a perfectly sequential memory access — ideal for cache. */
-long atree_traverse_sum(ArrayTree* t) {
+long
+atree_traverse_sum(ArrayTree* t)
+{
     long sum = 0;
     for (int i = 0; i < t->capacity; i++)
         if (t->data[i] != EMPTY_SLOT)
@@ -88,33 +83,40 @@ long atree_traverse_sum(ArrayTree* t) {
     return sum;
 }
 
-int atree_count(ArrayTree* t) {
+int
+atree_count(ArrayTree* t)
+{
     return t->size;
 }
 
-
-/* ── PointerTree ─────────────────────────────────────────*/
-
-void ptree_init(PointerTree* t, int capacity) {
+void
+ptree_init(PointerTree* t, int capacity)
+{
     t->pool     = (PNode*)malloc(sizeof(PNode) * (size_t)capacity);
     t->capacity = capacity;
     t->top      = 0;
     t->root     = NULL;
 }
 
-void ptree_destroy(PointerTree* t) {
+void
+ptree_destroy(PointerTree* t)
+{
     free(t->pool);
     t->pool     = NULL;
     t->root     = NULL;
     t->top      = 0;
 }
 
-void ptree_clear(PointerTree* t) {
+void
+ptree_clear(PointerTree* t)
+{
     t->top  = 0;
     t->root = NULL;
 }
 
-static PNode* ptree_alloc(PointerTree* t, int value) {
+static PNode*
+ptree_alloc(PointerTree* t, int value)
+{
     if (t->top >= t->capacity) return NULL;
     PNode* n  = &t->pool[t->top++];
     n->value  = value;
@@ -123,7 +125,9 @@ static PNode* ptree_alloc(PointerTree* t, int value) {
     return n;
 }
 
-static PNode* ptree_insert_rec(PointerTree* t, PNode* node, int value) {
+static PNode*
+ptree_insert_rec(PointerTree* t, PNode* node, int value)
+{
     if (!node) return ptree_alloc(t, value);
     if (value < node->value)
         node->left  = ptree_insert_rec(t, node->left,  value);
@@ -132,11 +136,15 @@ static PNode* ptree_insert_rec(PointerTree* t, PNode* node, int value) {
     return node;
 }
 
-void ptree_insert(PointerTree* t, int value) {
+void
+ptree_insert(PointerTree* t, int value)
+{
     t->root = ptree_insert_rec(t, t->root, value);
 }
 
-int ptree_search(PointerTree* t, int value) {
+int 
+ptree_search(PointerTree* t, int value)
+{
     PNode* cur = t->root;
     while (cur) {
         if      (value < cur->value) cur = cur->left;
@@ -146,26 +154,31 @@ int ptree_search(PointerTree* t, int value) {
     return 0;
 }
 
-/* in-order traversal — recursive */
-static long ptree_inorder_sum(PNode* node) {
+static long
+ptree_inorder_sum(PNode* node)
+{
     if (!node) return 0;
     return node->value
          + ptree_inorder_sum(node->left)
          + ptree_inorder_sum(node->right);
 }
 
-long ptree_traverse_sum(PointerTree* t) {
+long
+ptree_traverse_sum(PointerTree* t) 
+{
     return ptree_inorder_sum(t->root);
 }
 
-int ptree_count(PointerTree* t) {
+int
+ptree_count(PointerTree* t)
+{
     return t->top;
 }
 
 
-/* ── Layout info ─────────────────────────────────────────*/
-
-void print_tree_layout_info(ArrayTree* at, PointerTree* pt) {
+void 
+print_tree_layout_info(ArrayTree* at, PointerTree* pt)
+{
     printf("  Memory layout comparison\n");
     printf("  ────────────────────────────────────────────────\n");
     printf("  ArrayTree:\n");
@@ -199,3 +212,6 @@ void print_tree_layout_info(ArrayTree* at, PointerTree* pt) {
            64 / sizeof(int32_t),
            64 / sizeof(PNode));
 }
+
+#endif /*ARRAY_TREE_C*/
+
