@@ -1,6 +1,0 @@
-/home/milena/Desktop/Capston/custom_allocator_project/build/CMakeFiles/allocator_lib.dir
-/home/milena/Desktop/Capston/custom_allocator_project/build/CMakeFiles/unit_tests.dir
-/home/milena/Desktop/Capston/custom_allocator_project/build/CMakeFiles/benchmarks.dir
-/home/milena/Desktop/Capston/custom_allocator_project/build/CMakeFiles/test.dir
-/home/milena/Desktop/Capston/custom_allocator_project/build/CMakeFiles/edit_cache.dir
-/home/milena/Desktop/Capston/custom_allocator_project/build/CMakeFiles/rebuild_cache.dir

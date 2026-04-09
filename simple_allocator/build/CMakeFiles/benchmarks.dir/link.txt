@@ -1,1 +1,0 @@
-/usr/bin/c++  -O3 -Wall CMakeFiles/benchmarks.dir/tests/benchmark_tests.cpp.o -o benchmarks  liballocator_lib.a 

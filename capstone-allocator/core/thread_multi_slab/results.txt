@@ -1,0 +1,90 @@
+THREAD-SAFE SLAB ALLOCATOR — BENCHMARK RESULTS
+Averaged over 10 runs
+variants: shared (unsafe) | mutex (global lock) | tls (thread-local)
+==============================================================
+
+EXP 1: false sharing -- shared vs thread-local
+5000000 iterations, 32 hot objects, 16-byte slots
+
+variant                               avg (ms)    vs 1T shared
+1 thread, shared (reference)          488.78      1.00x
+2 threads, shared (false sharing)     562.19      1.15x slowdown
+2 threads, tls (no false sharing)     532.19      1.06x faster than shared 2T
+
+conclusion:
+with 2 threads sharing the same slab the cost goes up by 1.15x compared to
+a single thread doing the same work. this is false sharing: the two threads
+write to different objects but those objects sit on the same cache lines, so
+the CPU cache coherence protocol forces the cache line to bounce between cores
+on every write. the tls variant avoids this entirely because each thread's
+objects live in separate memory regions — no shared cache lines, no bouncing.
+on this machine the effect is modest (1.15x) because VirtualBox virtualizes
+the cache and the false sharing penalty is smaller than on bare metal.
+
+==============================================================
+
+EXP 2: global mutex cost
+2000000 iterations, 16 hot objects
+
+threads    mutex avg(ms)    tls avg(ms)    tls speedup
+1          208.45           199.99         1.04x
+2          697.36           223.90         3.11x
+4          1341.75          276.83         4.85x
+
+conclusion:
+mutex time grows roughly linearly with thread count: 1T=208ms, 2T=697ms
+(3.3x), 4T=1342ms (6.4x). this is serialization — adding more threads makes
+things worse because each thread must wait for the lock. tls time stays nearly
+flat: 200ms at 1T, 224ms at 2T, 277ms at 4T. the small increase is OS
+scheduling overhead, not contention. at 4 threads tls is 4.85x faster than
+mutex. the mutex variant cannot benefit from multiple cores at all.
+
+==============================================================
+
+EXP 3: scaling with thread count
+3000000 iterations, 32 hot objects
+
+threads    mutex (speedup vs 1T)    tls (speedup vs 1T)
+1          320 ms  (1.00x)          296 ms  (1.00x)
+2          1062 ms (0.30x)          341 ms  (0.87x)
+4          2050 ms (0.16x)          419 ms  (0.71x)
+
+conclusion:
+mutex degrades badly: going from 1 to 4 threads makes it 6x slower (320ms
+to 2050ms) because lock contention serializes all threads. tls degrades
+slightly: 4 threads is 0.71x the speed of 1 thread instead of the ideal
+4.0x. the gap from ideal parallelism comes from OS scheduling on VirtualBox
+(not all cores are equally fast) and the compaction overhead inside each
+thread's own slab firing on its own epoch. true bare-metal measurements
+would show tls closer to linear scaling.
+
+==============================================================
+
+EXP 4: all variants at 4 threads
+4 threads, 2000000 iterations each
+
+variant                           avg (ms)    vs tls
+shared (unsafe, false sharing)    413.71      1.45x slower
+mutex  (safe, serialized)         1353.92     4.74x slower
+tls    (safe, parallel)           285.52      1.00x  <- winner
+
+conclusion:
+at 4 threads the ranking is clear: tls wins by a large margin. shared is
+1.45x slower than tls due to false sharing — threads corrupt each other's
+cache lines. mutex is 4.74x slower due to full serialization. tls is both
+correct (no data races, each thread has private memory) and fast (no locks,
+no false sharing). it is the right design for multi-threaded allocators.
+
+==============================================================
+
+OVERALL SUMMARY
+
+the thread-local slab design solves both thread-safety problems at once:
+- false sharing: eliminated by giving each thread its own memory region
+- lock contention: eliminated by removing locks entirely
+mutex achieves correctness but at the cost of all parallelism (4.74x slower
+than tls at 4 threads). shared achieves speed but is incorrect (data races).
+tls achieves both. the cost of tls vs single-threaded is small: at 4 threads
+it runs at ~71% of single-thread speed, mostly due to OS scheduling on
+VirtualBox rather than any fundamental overhead in the design.
+all results collected on VirtualBox (Linux 6.17).

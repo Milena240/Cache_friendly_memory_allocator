@@ -1,0 +1,92 @@
+HOT-COLD SLAB ALLOCATOR — BENCHMARK RESULTS
+Averaged over 10 runs
+object size: 16 bytes | epoch size: 10000 accesses | hot percentile: 20%
+==============================================================
+
+EXP 2: cache performance -- hot-cold vs plain slab
+hot objs    plain avg(ms)   hot-cold avg(ms)    speedup avg
+512         0.144           0.147               1.14x
+1024        0.370           0.277               1.45x
+2048        0.744           0.672               1.26x
+4096        1.458           1.255               1.21x
+
+conclusion:
+at 512 hot objects the hot set (512 * 16B = 8 KB) fits in L1 cache, so both
+layouts perform similarly and the 1.14x speedup is within noise. from 1024
+objects onward the hot set spills past L1 (16+ KB) and the benefit becomes
+consistent: 1.45x at 1024 objects, settling around 1.2-1.3x at larger sizes.
+the drop from 1024 to 2048/4096 is expected — once hot objects already span
+multiple cache lines individually the packing gain is less dramatic. results
+show more variance at 512 objects (hot set right at the L1 boundary) and
+stabilize at larger sizes.
+
+==============================================================
+
+EXP 5: scan time per epoch
+8000 objects, 800 hot (10%), 300 scans per measurement
+
+epoch        scan avg(ms)    notes
+0            0.391           baseline — hot objects scattered, no compaction yet
+1            0.379           first compaction fired, objects start moving
+2            0.308           improvement accelerates
+3            0.346           some noise
+4            0.294           settling
+5            0.292           settling
+6            0.249           best observed epoch
+7            0.304           steady state
+8            0.323           steady state
+9            0.300           steady state
+10           0.302           steady state
+11           0.349           slight noise
+12           0.328           steady state
+
+steady state avg (epochs 4-12): 0.305 ms
+improvement epoch 0 -> steady state: ~22%
+
+conclusion:
+the improvement is more modest than the 3-run estimate suggested (~22% vs the
+earlier ~42%). epoch 0 averages 0.391 ms with hot objects scattered across ~2000
+cache lines. after the first compaction hot objects move to the front, reducing
+the effective working set to ~200 cache lines. the scan time drops and stabilizes
+around 0.305 ms by epochs 4-6. the variance across epochs in steady state is
+real — on VirtualBox the OS scheduler occasionally preempts the process mid-scan,
+spiking individual measurements. the trend (epoch 0 is the slowest, improvement
+happens in the first 2-3 compactions, then plateaus) is consistent across all 10
+runs.
+
+==============================================================
+
+EXP 6: compaction cost per slab size
+50 epochs at 1000 objects, 30 at 5000, 20 at 20000
+
+objects    epochs    avg (us)    min (us)    total (ms)
+1000       50        42.72       30.16       2.136
+5000       30        265.09      165.60      7.953
+20000      20        1982.58     775.35      39.652
+
+conclusion:
+compaction cost grows faster than linear. going from 1000 to 5000 objects (5x)
+increases avg compaction time by ~6x (43 us -> 265 us). going from 5000 to 20000
+(4x) increases it by another ~7.5x (265 us -> 1983 us). this is consistent with
+the O(n log n) sort plus O(n) swaps, each involving a malloc/memcpy/free.
+the min times reflect best-case runs where the OS did not preempt during compaction
+and hot objects were already close to their target slots. at 20000 objects the avg
+compaction cost is ~2 ms per epoch, amortized over 10000 accesses that is ~200 ns
+overhead per access. for workloads with strong hot/cold skew the cache gain
+outweighs this; for uniform access patterns the overhead is not justified.
+
+==============================================================
+
+OVERALL SUMMARY
+
+the hot-cold slab allocator delivers a consistent 1.2-1.45x speedup on scan-heavy
+workloads once the hot set exceeds L1 cache size (~16 KB on this machine). the
+peak speedup of 1.45x occurs at 1024 hot objects where the hot set is large enough
+to cause real L1 pressure but not so large that inter-object cache misses dominate.
+scan time improvement over epochs is real but moderate (~22% reduction by steady
+state), and the allocator converges within the first 2-3 epochs. the main cost is
+compaction: at 20000 objects each epoch costs ~2 ms, which becomes significant for
+high-throughput workloads. the design is best suited for medium-sized slabs (1000-5000
+objects) with skewed access patterns. all results collected on VirtualBox (Linux 6.17),
+scheduler noise is a factor — 10-run averages give a stable picture but individual
+runs can deviate noticeably.
