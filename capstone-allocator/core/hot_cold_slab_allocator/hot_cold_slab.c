@@ -90,6 +90,8 @@ slab_create(size_t obj_size, int capacity)
     for (int i = capacity - 1; i >= 0; i--)
         s->free_stack[s->free_top++] = i;
 
+    s->epoch_size = SLAB_EPOCH_SIZE;
+
     return s;
 }
 
@@ -159,7 +161,7 @@ slab_get(HotColdSlab* s, SlabHandle h)
     s->meta[slot].total_count++;
     s->epoch_accesses++;
 
-    if (s->epoch_accesses >= SLAB_EPOCH_SIZE)
+    if (s->epoch_accesses >= s->epoch_size)
         slab_epoch_check(s);
 
     return slot_ptr(s, slot);

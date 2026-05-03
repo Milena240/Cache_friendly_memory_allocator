@@ -80,42 +80,25 @@ is consistent from epoch 2 onward.
 
 ==============================================================
 
-EXP 5: OS page advisory with huge pages
-  mlock works:          yes
-  MADV_COLD works:      yes
-  hot  huge pages:      THP (kernel-managed) — MAP_HUGETLB not available
-  cold huge pages:      THP (kernel-managed)
+EXP ISOLATION: huge pages vs clustering vs mlock
+2048 objects, 409 hot (20%), 200 scans per rep
 
-  after 5 epochs (200 objects, 20% hot):
-    in hot region:  40 objects
-    in cold region: 160 objects
-    promotions: 40   demotions: 0
+                                               small epoch(2000)  large epoch(32000)
+A: flat (baseline)                                  0.187 ms           0.168 ms
+B: huge pages only                                  0.164 ms  1.14x    0.159 ms  1.06x
+C: clustering only                                  0.165 ms  1.13x    0.136 ms  1.24x
+D: huge pages + clustering (no mlock)               0.151 ms  1.24x    0.146 ms  1.15x
+E: full design (+ mlock)                            0.161 ms  1.16x    0.157 ms  1.07x
 
-  hp_slab_advise() applied:
-    hot  region (2048 KB): MADV_WILLNEED + MADV_HUGEPAGE
-    cold region (2048 KB): MADV_COLD     + MADV_NOHUGEPAGE
-    -> 1 huge page per region (2 MB each)
+small epoch: clustering + huge pages together win (D, 1.24x). frequent compaction
+means both features reinforce each other.
 
-  conclusion: page advisory calls succeed and are correctly differentiated between
-  hot and cold regions. the hot region gets pinned (mlock) and promoted for huge-page
-  backing; the cold region is marked reclaimable and fragmentation-allowed.
+large epoch: clustering alone wins (C, 1.24x). infrequent compaction means objects
+are already settled — adding huge pages adds THP overhead with little gain.
 
-==============================================================
-
-EXP 6: physical page tracking across epochs
-  /proc/self/pagemap physical page numbers require root; not run as root in this session.
-  virtual address changes are visible and confirm migration behavior:
-
-  epoch 0: all 6 tracked objects at cold.base (0x...200000 range)
-  epoch 1+: handles 0-2 (hot set) moved to hot.base (0x...400000 range) -> promoted
-            handles 3-5 also promoted because the hot region had spare capacity;
-            expected demotion did not occur within 5 epochs for this slab size.
-
-  page migration counters: 0 for all 6 handles across 5 epochs.
-  note: counter does not increment on virtual region change (cold->hot region copy);
-  it only increments on physical-page-level changes detectable via pagemap fd.
-  since pagemap requires root and runs without it, all physical addresses show as
-  "(no pagemap)" — virtual address changes alone confirm the promotion logic works.
+mlock: consistently the weakest feature in both cases. the OS keeps hot pages in
+RAM naturally when there is no memory pressure. mlock is a safety net for loaded
+servers, not a performance feature in a calm environment.
 
 ==============================================================
 

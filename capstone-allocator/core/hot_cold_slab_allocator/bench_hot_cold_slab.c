@@ -33,6 +33,30 @@ typedef struct {
 } Object;
 
 
+static double measure_hot_scan_hc(HotColdSlab* slab,
+                                   SlabHandle* hot_hs, int n_hot,
+                                   int scans)
+{
+    long volatile sink = 0;
+    double total = 0;
+    for (int rep = 0; rep < WARMUP_REPS + MEASURE_REPS; rep++) {
+        double t0 = now_ms();
+        for (int sc = 0; sc < scans; sc++)
+            for (int i = 0; i < n_hot; i++) {
+                int slot = slab->handle_to_slot[hot_hs[i]];
+                Object* o = (Object*)((char*)slab->data +
+                            (size_t)slot * sizeof(Object));
+                o->counter++;
+                sink += o->counter;
+            }
+        double t1 = now_ms();
+        if (rep >= WARMUP_REPS) total += t1 - t0;
+    }
+    (void)sink;
+    return total / MEASURE_REPS;
+}
+
+
 static void exp1_basic_structure(void)
 {
     exp_header("EXP 1: slab structure and handle system");
@@ -429,6 +453,85 @@ static void exp6_reorder_timing(void)
 }
 
 
+static void exp_epoch_sweep(void)
+{
+    exp_header("EXP EPOCH SWEEP: effect of epoch size on hot-set scan performance");
+    printf("8000 objects, 10%% hot. fixed budget: 80000 accesses on hot set before measuring.\n");
+    printf("smaller epoch = more compactions fired within budget = faster convergence.\n\n");
+
+    static const int EPOCH_SIZES[]  = { 2000, 4000, 8000, 16000, 32000 };
+    const int   N_EPOCH_SIZES  = 5;
+    const int   ACCESS_BUDGET  = 80000;
+    const int   N_OBJ          = 8000;
+    const float HOT_FRAC       = 0.10f;
+    const int   N_HOT          = (int)(N_OBJ * HOT_FRAC);
+    const int   N_SCANS        = 200;
+    const int   STRIDE         = (int)(1.0f / HOT_FRAC + 0.5f);
+
+    /* baseline: allocate objects but do zero accesses — fully scattered */
+    double t_baseline;
+    {
+        HotColdSlab* slab = slab_create(sizeof(Object), N_OBJ + 64);
+        SlabHandle* hot_hs = (SlabHandle*)malloc(sizeof(SlabHandle) * (size_t)N_HOT);
+        int h_hot = 0;
+        for (int i = 0; i < N_OBJ; i++) {
+            SlabHandle h = slab_alloc(slab);
+            ((Object*)slab_get_raw(slab, h))->id = i;
+            if (i % STRIDE == 0 && h_hot < N_HOT) hot_hs[h_hot++] = h;
+        }
+        t_baseline = measure_hot_scan_hc(slab, hot_hs, N_HOT, N_SCANS);
+        free(hot_hs);
+        slab_destroy(slab);
+    }
+
+    printf("%-12s  %-12s  %-14s  %-14s  %s\n",
+           "epoch_size", "compactions", "scan_ms", "drive_ms", "speedup_vs_flat");
+
+    for (int ei = 0; ei < N_EPOCH_SIZES; ei++) {
+        int epoch_size = EPOCH_SIZES[ei];
+
+        HotColdSlab* slab = slab_create(sizeof(Object), N_OBJ + 64);
+        slab->epoch_size  = epoch_size;
+
+        SlabHandle* hot_hs = (SlabHandle*)malloc(sizeof(SlabHandle) * (size_t)N_HOT);
+        int h_hot = 0;
+        for (int i = 0; i < N_OBJ; i++) {
+            SlabHandle h = slab_alloc(slab);
+            ((Object*)slab_get_raw(slab, h))->id = i;
+            if (i % STRIDE == 0 && h_hot < N_HOT) hot_hs[h_hot++] = h;
+        }
+
+        /* drive ACCESS_BUDGET accesses — triggers compactions at every epoch_size interval */
+        long volatile sink = 0;
+        double t_drive0 = now_ms();
+        for (int iter = 0; iter < ACCESS_BUDGET; iter++) {
+            Object* o = (Object*)slab_get(slab, hot_hs[iter % N_HOT]);
+            o->counter++;
+            sink += o->counter;
+        }
+        double t_drive = now_ms() - t_drive0;
+
+        /* measure steady-state hot-set scan after those accesses */
+        double t_scan = measure_hot_scan_hc(slab, hot_hs, N_HOT, N_SCANS);
+
+        printf("%-12d  %-12d  %-14.3f  %-14.3f  %.2fx\n",
+               epoch_size, slab->n_compactions, t_scan, t_drive,
+               t_baseline / t_scan);
+
+        free(hot_hs);
+        slab_destroy(slab);
+        (void)sink;
+    }
+
+    printf("\nbaseline (no compaction, fully scattered): %.3f ms\n", t_baseline);
+    printf("compactions = %d / epoch_size (larger epoch = fewer compactions = less convergence)\n",
+           ACCESS_BUDGET);
+    printf("drive_ms = total time to run %d accesses, includes compaction overhead\n",
+           ACCESS_BUDGET);
+    printf("speedup_vs_flat = how much faster scan is vs the uncompacted baseline\n\n");
+}
+
+
 int main(void)
 {
     printf("\n");
@@ -446,6 +549,7 @@ int main(void)
     exp4_compaction_lifecycle();
     exp5_epoch_performance_progression();
     exp6_reorder_timing();
+    exp_epoch_sweep();
 
     printf("\n=== SUMMARY ===\n\n");
     printf("one flat region, slots sorted by access count every %d accesses\n", SLAB_EPOCH_SIZE);

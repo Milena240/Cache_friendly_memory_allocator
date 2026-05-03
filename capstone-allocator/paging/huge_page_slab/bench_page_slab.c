@@ -6,6 +6,8 @@
 #include <time.h>
 #include <math.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/resource.h>
 
 static double now_ms(void)
 {
@@ -58,7 +60,7 @@ static void exp1_region_structure(void)
     }
 
     printf("after allocating 16 objects (all cold):\n");
-    hp_slab_print_layout(s, 20);
+    hp_slab_print_layout(s, 24);  /* 6 hot-reserved slots + 16 cold = last object at gslot 21, need >=22 rows */
 
     hp_slab_snapshot_pages(s);
     printf("snapshot taken, now hammering handles 0, 5, 11\n\n");
@@ -76,7 +78,7 @@ static void exp1_region_structure(void)
            s->n_epochs, s->n_compactions);
 
     hp_slab_diff_pages(s, "after promotion of handles 0, 5, 11");
-    hp_slab_print_layout(s, 20);
+    hp_slab_print_layout(s, 24);  /* same reason: show all 16 objects */
 
     int all_ok = 1;
     for (int i = 0; i < 16; i++) {
@@ -101,10 +103,10 @@ static void exp1_region_structure(void)
 static void exp2_promotion_demotion(void)
 {
     exp_header("EXP 2: promotion and demotion lifecycle");
-    printf("phase 1: heat handles 0,1,2 until promoted to huge-page hot region\n");
-    printf("phase 2: stop touching them, heat 40,41,42 instead -> 0,1,2 should get demoted\n\n");
+    printf("phase 1: heat handles 0,1,2 until promoted to huge-page hot region (fills it completely)\n");
+    printf("phase 2: stop touching them, heat 10,11,12 instead -> 0,1,2 must be demoted to make room\n\n");
 
-    int N = 60;
+    int N = 15;  /* hot_capacity = 20%% of 15 = 3, exactly fits handles 0,1,2 */
     HpAwareSlab* s = hp_slab_create(sizeof(Obj), N);
 
     HpSlabHandle* hs = (HpSlabHandle*)malloc(sizeof(HpSlabHandle) * (size_t)N);
@@ -123,35 +125,50 @@ static void exp2_promotion_demotion(void)
         }
     }
 
-    printf("after phase 1 (%d compactions, %d promotions):\n", s->n_compactions, s->n_promotions);
-    for (int i = 0; i < 6; i++) {
+    printf("after phase 1 (%d compactions, %d promotions):\n\n", s->n_compactions, s->n_promotions);
+    hp_slab_print_layout(s, s->total_capacity);
+
+    /* record region and slot before phase 2 so we can show before -> after */
+    int region_before[15];
+    int gslot_before[15];
+    for (int i = 0; i < N; i++) {
         int gslot = s->handle_to_slot[hs[i]];
-        printf("  handle %2d -> %s\n", hs[i],
-               s->meta[gslot].region == HP_REGION_HOT ? "HOT" : "cold");
+        region_before[i] = s->meta[gslot].region;
+        gslot_before[i]  = gslot;
     }
-    printf("\n");
-    hp_slab_diff_pages(s, "after phase-1 promotion");
 
     hp_slab_snapshot_pages(s);
     for (int rep = 0; rep < HP_SLAB_EPOCH_SIZE * 6; rep++) {
-        for (int h = 40; h < 43; h++) {
+        for (int h = 10; h < 13; h++) {
             Obj* o = (Obj*)hp_slab_get(s, hs[h]);
             o->counter++;
             sink += o->counter;
         }
     }
 
-    printf("after phase 2 (%d compactions, %d demotions):\n", s->n_compactions, s->n_demotions);
+    printf("after phase 2 (%d compactions, %d demotions):\n\n", s->n_compactions, s->n_demotions);
+    hp_slab_print_layout(s, s->total_capacity);
+
+    printf("region changes:\n");
+    printf("  %-9s  %-14s  %-14s  %s\n", "handle", "before", "after", "note");
     for (int i = 0; i < 3; i++) {
-        int gslot = s->handle_to_slot[hs[i]];
-        printf("  handle %2d (old hot) -> %s  cold_epochs=%d\n", hs[i],
-               s->meta[gslot].region == HP_REGION_HOT ? "HOT" : "cold",
-               s->meta[gslot].cold_epochs);
+        int gslot_after = s->handle_to_slot[hs[i]];
+        const char* before = region_before[i]              == HP_REGION_HOT ? "HOT"  : "cold";
+        const char* after  = s->meta[gslot_after].region  == HP_REGION_HOT ? "HOT"  : "cold";
+        printf("  handle %2d:  slot %2d %-4s  ->  slot %2d %-4s  (demoted after %d cold epochs)\n",
+               hs[i],
+               gslot_before[i], before,
+               gslot_after,     after,
+               s->meta[gslot_after].cold_epochs);
     }
-    for (int h = 40; h < 43; h++) {
-        int gslot = s->handle_to_slot[hs[h]];
-        printf("  handle %2d (new hot) -> %s\n", hs[h],
-               s->meta[gslot].region == HP_REGION_HOT ? "HOT" : "cold");
+    for (int h = 10; h < 13; h++) {
+        int gslot_after = s->handle_to_slot[hs[h]];
+        const char* before = region_before[h]             == HP_REGION_HOT ? "HOT"  : "cold";
+        const char* after  = s->meta[gslot_after].region == HP_REGION_HOT ? "HOT"  : "cold";
+        printf("  handle %2d:  slot %2d %-4s  ->  slot %2d %-4s  (promoted)\n",
+               hs[h],
+               gslot_before[h], before,
+               gslot_after,     after);
     }
     printf("\n");
     hp_slab_diff_pages(s, "after phase-2 demotion");
@@ -260,6 +277,107 @@ static void exp3_cache_performance(void)
 }
 
 
+static void exp3b_full_scan(void)
+{
+    exp_header("EXP 3b: flat vs huge-page-aware FULL slab scan");
+    printf("flat: all objects in one contiguous slab, sequential scan\n");
+    printf("huge-page-aware: hot objects promoted to huge-page region, cold stay separate\n");
+    printf("scanning ALL objects (hot + cold), 200 scans, avg over 10 runs\n\n");
+
+    static const int N_HOT_SIZES[] = { 256, 512, 1024, 2048 };
+    int n_tests      = 4;
+    int cold_per_hot = 4;
+    int n_scans      = 200;
+
+    printf("%-10s  %-12s  %-12s  %-15s  %s\n",
+           "hot objs", "total objs", "flat (ms)", "huge-page (ms)", "speedup");
+
+    for (int ti = 0; ti < n_tests; ti++) {
+        int n_hot     = N_HOT_SIZES[ti];
+        int n_objects = n_hot * (cold_per_hot + 1);
+
+        HpSlabHandle* all_flat = (HpSlabHandle*)malloc(sizeof(HpSlabHandle) * (size_t)n_objects);
+        HpSlabHandle* all_hp   = (HpSlabHandle*)malloc(sizeof(HpSlabHandle) * (size_t)n_objects);
+        HpSlabHandle* hot_hp   = (HpSlabHandle*)malloc(sizeof(HpSlabHandle) * (size_t)n_hot);
+
+        double t_flat = 0;
+        {
+            HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_objects + 16);
+            for (int i = 0; i < n_objects; i++) {
+                all_flat[i] = hp_slab_alloc(s);
+                ((Obj*)hp_slab_get_raw(s, all_flat[i]))->id = i;
+            }
+
+            long volatile sink = 0;
+            double total = 0;
+            for (int rep = 0; rep < WARMUP_REPS + MEASURE_REPS; rep++) {
+                double t0 = now_ms();
+                for (int scan = 0; scan < n_scans; scan++)
+                    for (int i = 0; i < n_objects; i++) {
+                        Obj* o = (Obj*)hp_slab_get_raw(s, all_flat[i]);
+                        o->counter++;
+                        sink += o->counter;
+                    }
+                double t1 = now_ms();
+                if (rep >= WARMUP_REPS) total += t1 - t0;
+            }
+            t_flat = total / MEASURE_REPS;
+            hp_slab_destroy(s);
+            (void)sink;
+        }
+
+        double t_hp = 0;
+        {
+            HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_objects + 16);
+            int hi = 0;
+            for (int i = 0; i < n_objects; i++) {
+                all_hp[i] = hp_slab_alloc(s);
+                ((Obj*)hp_slab_get_raw(s, all_hp[i]))->id = i;
+                if ((i % (cold_per_hot + 1)) == cold_per_hot && hi < n_hot)
+                    hot_hp[hi++] = all_hp[i];
+            }
+
+            /* drive hot objects into the huge-page region */
+            long volatile sink = 0;
+            for (int iter = 0; iter < HP_SLAB_EPOCH_SIZE * 6; iter++) {
+                Obj* o = (Obj*)hp_slab_get(s, hot_hp[iter % n_hot]);
+                o->counter++;
+                sink += o->counter;
+            }
+
+            double total = 0;
+            for (int rep = 0; rep < WARMUP_REPS + MEASURE_REPS; rep++) {
+                double t0 = now_ms();
+                for (int scan = 0; scan < n_scans; scan++)
+                    for (int i = 0; i < n_objects; i++) {
+                        Obj* o = (Obj*)hp_slab_get_raw(s, all_hp[i]);
+                        o->counter++;
+                        sink += o->counter;
+                    }
+                double t1 = now_ms();
+                if (rep >= WARMUP_REPS) total += t1 - t0;
+            }
+            t_hp = total / MEASURE_REPS;
+            hp_slab_destroy(s);
+            (void)sink;
+        }
+
+        printf("%-10d  %-12d  %-12.3f  %-15.3f  %.2fx\n",
+               n_hot, n_objects, t_flat, t_hp, t_flat / t_hp);
+
+        free(all_flat);
+        free(all_hp);
+        free(hot_hp);
+    }
+
+    printf("\nwhen scanning all objects the flat allocator has better sequential locality:\n");
+    printf("all objects sit in one contiguous region so the scan is a straight memory walk.\n");
+    printf("the huge-page allocator splits objects across two mmap regions (hot + cold),\n");
+    printf("so a full scan jumps between regions and loses the sequential-access advantage.\n");
+    printf("a speedup < 1.0x here means flat wins — expected and by design.\n\n");
+}
+
+
 static void exp4_epoch_progression(void)
 {
     exp_header("EXP 4: scan time per epoch");
@@ -352,7 +470,7 @@ static void exp4_epoch_progression(void)
 }
 
 
-static void exp5_page_management(void)
+__attribute__((unused)) static void exp5_page_management(void)
 {
     exp_header("EXP 5: OS page advisory with huge pages");
     printf("hot region:  MADV_HUGEPAGE + mlock (huge pages, always resident)\n");
@@ -404,7 +522,7 @@ static void exp5_page_management(void)
 }
 
 
-static void exp6_page_tracking(void)
+__attribute__((unused)) static void exp6_page_tracking(void)
 {
     exp_header("EXP 6: physical page tracking across epochs");
     printf("track 6 objects across 5 epochs via /proc/self/pagemap\n");
@@ -508,6 +626,454 @@ static void exp6_page_tracking(void)
 }
 
 
+__attribute__((unused)) static void exp7_mlock_stress(void)
+{
+    exp_header("EXP 7: mlock stress — large region behavior under memory pressure");
+
+    /* ---- system info ---- */
+    long mem_total_kb = 0, mem_avail_kb = 0, swap_total_kb = 0;
+    FILE* mf = fopen("/proc/meminfo", "r");
+    if (mf) {
+        char line[256];
+        while (fgets(line, sizeof(line), mf)) {
+            sscanf(line, "MemTotal: %ld kB", &mem_total_kb);
+            sscanf(line, "MemAvailable: %ld kB", &mem_avail_kb);
+            sscanf(line, "SwapTotal: %ld kB", &swap_total_kb);
+        }
+        fclose(mf);
+    }
+
+    struct rlimit rl = {0, 0};
+    getrlimit(RLIMIT_MEMLOCK, &rl);
+
+    printf("system RAM      : %ld MB\n", mem_total_kb / 1024);
+    printf("available RAM   : %ld MB\n", mem_avail_kb / 1024);
+    printf("swap space      : %ld MB\n", swap_total_kb / 1024);
+    if (rl.rlim_cur == RLIM_INFINITY)
+        printf("RLIMIT_MEMLOCK  : unlimited\n\n");
+    else
+        printf("RLIMIT_MEMLOCK  : %lu KB (soft) — mlock will fail above this\n\n",
+               (unsigned long)(rl.rlim_cur / 1024));
+
+    /* ---- sizes to test ---- */
+    static const struct { size_t bytes; const char* label; } SIZES[] = {
+        { 128UL << 20,                   "128 MB" },
+        { 512UL << 20,                   "512 MB" },
+        { 1UL   << 30,                   "1 GB"   },
+        { 2UL   << 30,                   "2 GB"   },
+        { (size_t)(3.5 * (1UL << 30)),   "3.5 GB" },
+    };
+    int n_sizes = 5;
+
+    printf("%-8s  %-16s  %-12s  %-8s  %-10s  %-12s  note\n",
+           "size", "page type", "first-touch", "mlock", "mlock(ms)", "warm-scan");
+    printf("%-8s  %-16s  %-12s  %-8s  %-10s  %-12s\n",
+           "--------", "----------------", "------------", "--------",
+           "----------", "------------");
+
+    for (int si = 0; si < n_sizes; si++) {
+        size_t nbytes = SIZES[si].bytes;
+
+        /* skip if clearly too large for RAM+swap */
+        if (nbytes / 1024 > (size_t)(mem_total_kb + swap_total_kb) * 9 / 10) {
+            printf("%-8s  skipped — exceeds 90%% of RAM+swap\n\n", SIZES[si].label);
+            continue;
+        }
+
+        for (int pt = 0; pt < 2; pt++) {
+            const char* ptype = (pt == 0) ? "4 KB pages" : "THP 2 MB pages";
+
+            void* ptr = mmap(NULL, nbytes, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (ptr == MAP_FAILED) {
+                printf("%-8s  %-16s  mmap failed: %s\n",
+                       SIZES[si].label, ptype, strerror(errno));
+                continue;
+            }
+
+            if (pt == 1)
+                madvise(ptr, nbytes, MADV_HUGEPAGE);
+
+            /* first touch: fault in every page, building page tables */
+            double t0 = now_ms();
+            volatile char* p = (volatile char*)ptr;
+            for (size_t off = 0; off < nbytes; off += 4096)
+                p[off] = (char)(off & 0xFF);
+            double first_ms = now_ms() - t0;
+
+            /* attempt mlock — pins pages in RAM, prevents swap eviction */
+            double tl0 = now_ms();
+            int ml_ret  = mlock(ptr, nbytes);
+            int ml_err  = errno;
+            double mlock_ms = now_ms() - tl0;
+
+            const char* ml_status;
+            if      (ml_ret == 0)       ml_status = "OK";
+            else if (ml_err == ENOMEM)  ml_status = "ENOMEM";
+            else if (ml_err == EPERM)   ml_status = "EPERM";
+            else                        ml_status = "FAIL";
+
+            /* warm scan: re-read every page after mlock attempt */
+            long volatile sink = 0;
+            double tw0 = now_ms();
+            for (size_t off = 0; off < nbytes; off += 4096)
+                sink += p[off];
+            double warm_ms = now_ms() - tw0;
+
+            /* note what this result means */
+            const char* note = "";
+            if (ml_ret != 0)
+                note = "unlocked — pages are swap-eligible";
+            else if (nbytes / 1024 > (size_t)mem_avail_kb)
+                note = "locked — OS had to evict other pages to fit";
+
+            printf("%-8s  %-16s  %7.0f ms    %-8s  %6.1f ms   %7.0f ms    %s\n",
+                   (pt == 0) ? SIZES[si].label : "",
+                   ptype, first_ms, ml_status, mlock_ms, warm_ms, note);
+
+            if (ml_ret == 0) munlock(ptr, nbytes);
+            munmap(ptr, nbytes);
+            (void)sink;
+        }
+        printf("\n");
+    }
+
+    printf("interpretation:\n");
+    printf("  first-touch : faults every page in from zero; includes page table allocation\n");
+    printf("                THP reduces page table entries 512x -> should be faster at large sizes\n");
+    printf("  mlock OK    : pages are pinned in RAM, kernel cannot swap them out\n");
+    printf("  mlock EPERM : process hit RLIMIT_MEMLOCK; pages remain in RAM for now\n");
+    printf("                but are swap-eligible — OS may evict them under pressure\n");
+    printf("  mlock ENOMEM: kernel could not find enough lockable physical pages\n");
+    printf("  warm-scan   : sequential re-read after mlock attempt\n");
+    printf("                if warm >> first-touch: pages were evicted to swap between the two\n");
+    printf("                if warm << first-touch: no swap, TLB/cache warmed up (expected)\n");
+    printf("  4KB vs THP  : THP packs 512 pages into one TLB entry; at 3.5 GB that is\n");
+    printf("                ~3584 TLB entries (THP) vs ~917504 TLB entries (4KB)\n\n");
+}
+
+
+static double measure_hot_scan(HpAwareSlab* s,
+                               HpSlabHandle* hot_hs, int n_hot,
+                               int scans)
+{
+    long volatile sink = 0;
+    double total = 0;
+    for (int rep = 0; rep < WARMUP_REPS + MEASURE_REPS; rep++) {
+        double t0 = now_ms();
+        for (int sc = 0; sc < scans; sc++)
+            for (int i = 0; i < n_hot; i++) {
+                Obj* o = (Obj*)hp_slab_get_raw(s, hot_hs[i]);
+                o->counter++;
+                sink += o->counter;
+            }
+        double t1 = now_ms();
+        if (rep >= WARMUP_REPS) total += t1 - t0;
+    }
+    (void)sink;
+    return total / MEASURE_REPS;
+}
+
+static void drive_promotions(HpAwareSlab* s, HpSlabHandle* hot_hs, int n_hot)
+{
+    long volatile sink = 0;
+    for (int iter = 0; iter < HP_SLAB_EPOCH_SIZE * 6; iter++) {
+        Obj* o = (Obj*)hp_slab_get(s, hot_hs[iter % n_hot]);
+        o->counter++;
+        sink += o->counter;
+    }
+    (void)sink;
+}
+
+/*
+ * EXP ISOLATION: which features actually earn their keep?
+ *
+ * Five variants, all using the same workload:
+ *   n_obj objects allocated, top 20% are hot, scan hot set 200 times.
+ *
+ * A -- flat baseline:        no huge pages, no clustering, no mlock
+ * B -- huge pages only:      huge pages,    no clustering, no mlock
+ * C -- clustering only:      no huge pages, clustering,    no mlock
+ * D -- huge + clustering:    huge pages,    clustering,    no mlock
+ * E -- full design:          huge pages,    clustering,    mlock
+ *
+ * This answers the user's question: does the OS handle things automatically
+ * (making our clustering and mlock redundant), or does each feature
+ * contribute a measurable benefit?
+ */
+static void exp_isolation(void)
+{
+    exp_header("EXP ISOLATION: huge pages vs clustering vs mlock");
+
+    int n_obj    = 2048;
+    int n_hot    = (int)(n_obj * HP_SLAB_HOT_PERCENTILE);
+    int stride   = (int)(1.0 / HP_SLAB_HOT_PERCENTILE);
+    int scans    = 200;
+
+    printf("workload: %d total objects, %d hot (%.0f%%), scan hot set %d times\n\n",
+           n_obj, n_hot, HP_SLAB_HOT_PERCENTILE * 100.0, scans);
+
+    double times[5] = {0};
+    const char* names[5] = {
+        "A: flat (no huge pages, no cluster, no mlock)",
+        "B: huge pages only (no cluster, no mlock)",
+        "C: clustering only (no huge pages, no mlock)",
+        "D: huge pages + clustering (no mlock)",
+        "E: full design (huge pages + clustering + mlock)"
+    };
+
+    HpSlabHandle* hot_hs = (HpSlabHandle*)malloc(sizeof(HpSlabHandle) * (size_t)n_hot);
+
+    /* ---- A: flat baseline ---- */
+    {
+        HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+        madvise(s->hot.base,  s->hot.byte_size,  MADV_NOHUGEPAGE);
+        madvise(s->cold.base, s->cold.byte_size, MADV_NOHUGEPAGE);
+        if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+
+        int hi = 0;
+        for (int i = 0; i < n_obj; i++) {
+            HpSlabHandle h = hp_slab_alloc(s);
+            ((Obj*)hp_slab_get_raw(s, h))->id = i;
+            if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+        }
+        /* no clustering: use get_raw so objects stay scattered, never promoted */
+        times[0] = measure_hot_scan(s, hot_hs, n_hot, scans);
+        hp_slab_destroy(s);
+    }
+
+    /* ---- B: huge pages only ---- */
+    {
+        HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+        if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+
+        int hi = 0;
+        for (int i = 0; i < n_obj; i++) {
+            HpSlabHandle h = hp_slab_alloc(s);
+            ((Obj*)hp_slab_get_raw(s, h))->id = i;
+            if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+        }
+        /* no clustering: objects stay in cold region (which has huge pages) */
+        times[1] = measure_hot_scan(s, hot_hs, n_hot, scans);
+        hp_slab_destroy(s);
+    }
+
+    /* ---- C: clustering only ---- */
+    {
+        HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+        madvise(s->hot.base,  s->hot.byte_size,  MADV_NOHUGEPAGE);
+        madvise(s->cold.base, s->cold.byte_size, MADV_NOHUGEPAGE);
+        if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+
+        int hi = 0;
+        for (int i = 0; i < n_obj; i++) {
+            HpSlabHandle h = hp_slab_alloc(s);
+            ((Obj*)hp_slab_get_raw(s, h))->id = i;
+            if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+        }
+        drive_promotions(s, hot_hs, n_hot);
+        times[2] = measure_hot_scan(s, hot_hs, n_hot, scans);
+        hp_slab_destroy(s);
+    }
+
+    /* ---- D: huge pages + clustering, no mlock ---- */
+    {
+        HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+        if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+
+        int hi = 0;
+        for (int i = 0; i < n_obj; i++) {
+            HpSlabHandle h = hp_slab_alloc(s);
+            ((Obj*)hp_slab_get_raw(s, h))->id = i;
+            if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+        }
+        drive_promotions(s, hot_hs, n_hot);
+        times[3] = measure_hot_scan(s, hot_hs, n_hot, scans);
+        hp_slab_destroy(s);
+    }
+
+    /* ---- E: full design (huge pages + clustering + mlock) ---- */
+    {
+        HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+
+        int hi = 0;
+        for (int i = 0; i < n_obj; i++) {
+            HpSlabHandle h = hp_slab_alloc(s);
+            ((Obj*)hp_slab_get_raw(s, h))->id = i;
+            if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+        }
+        drive_promotions(s, hot_hs, n_hot);
+        times[4] = measure_hot_scan(s, hot_hs, n_hot, scans);
+        hp_slab_destroy(s);
+    }
+
+    printf("%-50s  %-12s  %s\n", "variant", "scan (ms)", "vs baseline A");
+    for (int i = 0; i < 5; i++) {
+        printf("%-50s  %-12.3f  %.2fx%s\n",
+               names[i], times[i], times[0] / times[i],
+               i == 0 ? "  (baseline)" : "");
+    }
+
+    printf("\n");
+    printf("  B vs A: does huge pages alone help (without clustering)?\n");
+    printf("  C vs A: does clustering alone help (without huge pages)?\n");
+    printf("  D vs C: do huge pages add benefit on top of clustering?\n");
+    printf("  E vs D: does mlock specifically add anything?\n\n");
+
+    free(hot_hs);
+}
+
+
+static void exp_epoch_sweep(void)
+{
+    exp_header("EXP EPOCH SWEEP: which variant wins at each epoch size?");
+    printf("tests A=flat, B=huge only, C=cluster only, D=huge+cluster, E=full\n");
+    printf("fixed budget of 48000 accesses before measuring — shows how each\n");
+    printf("epoch size changes convergence quality and which feature matters most.\n\n");
+
+    static const int EPOCH_SIZES[] = { 2000, 4000, 8000, 16000, 32000 };
+    const int ACCESS_BUDGET = 48000;
+    const int n_obj   = 2048;
+    const int n_hot   = (int)(n_obj * HP_SLAB_HOT_PERCENTILE);
+    const int stride  = (int)(1.0 / HP_SLAB_HOT_PERCENTILE);
+    const int scans   = 200;
+
+    HpSlabHandle* hot_hs = (HpSlabHandle*)malloc(sizeof(HpSlabHandle) * (size_t)n_hot);
+
+    printf("%-10s  %-10s  %-10s  %-12s  %-10s  %-10s  compacts  winner\n",
+           "epoch", "A:flat", "B:huge", "C:cluster", "D:h+cl", "E:full");
+
+    for (int ei = 0; ei < 5; ei++) {
+        int epoch_size = EPOCH_SIZES[ei];
+        double times[5]    = {0};
+        int    compacts[5] = {0};
+
+        /* A: flat — no huge pages, no clustering */
+        {
+            HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+            s->epoch_size = epoch_size;
+            madvise(s->hot.base,  s->hot.byte_size,  MADV_NOHUGEPAGE);
+            madvise(s->cold.base, s->cold.byte_size, MADV_NOHUGEPAGE);
+            if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+            int hi = 0;
+            for (int i = 0; i < n_obj; i++) {
+                HpSlabHandle h = hp_slab_alloc(s);
+                ((Obj*)hp_slab_get_raw(s, h))->id = i;
+                if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+            }
+            times[0]    = measure_hot_scan(s, hot_hs, n_hot, scans);
+            compacts[0] = s->n_compactions;
+            hp_slab_destroy(s);
+        }
+
+        /* B: huge pages only — no clustering */
+        {
+            HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+            s->epoch_size = epoch_size;
+            if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+            int hi = 0;
+            for (int i = 0; i < n_obj; i++) {
+                HpSlabHandle h = hp_slab_alloc(s);
+                ((Obj*)hp_slab_get_raw(s, h))->id = i;
+                if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+            }
+            times[1]    = measure_hot_scan(s, hot_hs, n_hot, scans);
+            compacts[1] = s->n_compactions;
+            hp_slab_destroy(s);
+        }
+
+        /* C: clustering only — no huge pages */
+        {
+            HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+            s->epoch_size = epoch_size;
+            madvise(s->hot.base,  s->hot.byte_size,  MADV_NOHUGEPAGE);
+            madvise(s->cold.base, s->cold.byte_size, MADV_NOHUGEPAGE);
+            if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+            int hi = 0;
+            for (int i = 0; i < n_obj; i++) {
+                HpSlabHandle h = hp_slab_alloc(s);
+                ((Obj*)hp_slab_get_raw(s, h))->id = i;
+                if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+            }
+            long volatile sink = 0;
+            for (int iter = 0; iter < ACCESS_BUDGET; iter++) {
+                Obj* o = (Obj*)hp_slab_get(s, hot_hs[iter % n_hot]);
+                o->counter++;
+                sink += o->counter;
+            }
+            (void)sink;
+            times[2]    = measure_hot_scan(s, hot_hs, n_hot, scans);
+            compacts[2] = s->n_compactions;
+            hp_slab_destroy(s);
+        }
+
+        /* D: huge pages + clustering, no mlock */
+        {
+            HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+            s->epoch_size = epoch_size;
+            if (s->hot.is_locked) { munlock(s->hot.base, s->hot.byte_size); s->hot.is_locked = 0; }
+            int hi = 0;
+            for (int i = 0; i < n_obj; i++) {
+                HpSlabHandle h = hp_slab_alloc(s);
+                ((Obj*)hp_slab_get_raw(s, h))->id = i;
+                if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+            }
+            long volatile sink = 0;
+            for (int iter = 0; iter < ACCESS_BUDGET; iter++) {
+                Obj* o = (Obj*)hp_slab_get(s, hot_hs[iter % n_hot]);
+                o->counter++;
+                sink += o->counter;
+            }
+            (void)sink;
+            times[3]    = measure_hot_scan(s, hot_hs, n_hot, scans);
+            compacts[3] = s->n_compactions;
+            hp_slab_destroy(s);
+        }
+
+        /* E: full design — huge pages + clustering + mlock */
+        {
+            HpAwareSlab* s = hp_slab_create(sizeof(Obj), n_obj + 16);
+            s->epoch_size = epoch_size;
+            int hi = 0;
+            for (int i = 0; i < n_obj; i++) {
+                HpSlabHandle h = hp_slab_alloc(s);
+                ((Obj*)hp_slab_get_raw(s, h))->id = i;
+                if (i % stride == stride - 1 && hi < n_hot) hot_hs[hi++] = h;
+            }
+            long volatile sink = 0;
+            for (int iter = 0; iter < ACCESS_BUDGET; iter++) {
+                Obj* o = (Obj*)hp_slab_get(s, hot_hs[iter % n_hot]);
+                o->counter++;
+                sink += o->counter;
+            }
+            (void)sink;
+            times[4]    = measure_hot_scan(s, hot_hs, n_hot, scans);
+            compacts[4] = s->n_compactions;
+            hp_slab_destroy(s);
+        }
+
+        int winner = 0;
+        for (int i = 1; i < 5; i++)
+            if (times[i] < times[winner]) winner = i;
+
+        const char* wnames[5] = { "A:flat", "B:huge", "C:cluster", "D:h+cl", "E:full" };
+        printf("%-10d  %-10.3f  %-10.3f  %-12.3f  %-10.3f  %-10.3f  %-8d  %s\n",
+               epoch_size,
+               times[0], times[1], times[2], times[3], times[4],
+               compacts[2],  /* clustering variants C/D/E share same compaction count */
+               wnames[winner]);
+    }
+
+    printf("\nfixed access budget: %d accesses before measuring\n", ACCESS_BUDGET);
+    printf("compacts column = number fired in variant C (same for D and E)\n");
+    printf("small epoch: more compactions = objects cluster faster = C/D/E benefit more\n");
+    printf("large epoch: few compactions within budget = objects still scattered = A/B may win\n");
+    printf("mlock (E vs D): adds benefit only when pages can be evicted under pressure\n\n");
+
+    free(hot_hs);
+}
+
+
 int main(void)
 {
     {
@@ -538,10 +1104,10 @@ int main(void)
     exp1_region_structure();
     exp2_promotion_demotion();
     exp3_cache_performance();
+    exp3b_full_scan();
     exp4_epoch_progression();
-    exp5_page_management();
-    exp6_page_tracking();
-
+    exp_isolation();
+    exp_epoch_sweep();
     printf("\n=== SUMMARY ===\n\n");
     printf("two mmap regions, both backed by huge pages (MAP_HUGETLB or THP fallback)\n");
     printf("hot region: MADV_HUGEPAGE + mlock -> one 2 MB TLB entry, never evicted\n");

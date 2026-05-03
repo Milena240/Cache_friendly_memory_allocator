@@ -12,7 +12,8 @@
 
 
 typedef struct {
-    MultiSlab* slab;
+    MultiSlab*      slab;
+    pthread_mutex_t lock;
 } SharedSlab;
 
 SharedSlab* shared_create (void);
@@ -21,45 +22,32 @@ AllocHandle shared_alloc  (SharedSlab* s, size_t size);
 void*       shared_get    (SharedSlab* s, AllocHandle h);
 
 typedef struct {
-    MultiSlab*      slab;
-    pthread_mutex_t lock;
-} MutexSlab;
-
-MutexSlab*  mutex_create (void);
-void        mutex_destroy(MutexSlab* s);
-AllocHandle mutex_alloc  (MutexSlab* s, size_t size);
-void*       mutex_get    (MutexSlab* s, AllocHandle h);
-
-typedef struct {
     MultiSlab*      per_thread[MAX_THREADS];
     int             n_registered;
     pthread_key_t   key;
-    pthread_mutex_t reg_lock;  
+    pthread_mutex_t reg_lock;
 } TLSSlab;
 
-TLSSlab*    tls_create            (void);
-void        tls_destroy           (TLSSlab* s);
-void        tls_register_thread   (TLSSlab* s, int thread_id);
-AllocHandle tls_alloc             (TLSSlab* s, size_t size);
-void*       tls_get               (TLSSlab* s, AllocHandle h);
+TLSSlab*    tls_create          (void);
+void        tls_destroy         (TLSSlab* s);
+void        tls_register_thread (TLSSlab* s, int thread_id);
+AllocHandle tls_alloc           (TLSSlab* s, size_t size);
+void*       tls_get             (TLSSlab* s, AllocHandle h);
 
 typedef struct {
     int   thread_id;
     int   n_iters;
     int   n_hot;
 
-    SharedSlab*  shared;
-    MutexSlab*   mutex;
-    TLSSlab*     tls;
+    SharedSlab*      shared;
+    TLSSlab*         tls;
 
-    AllocHandle* hot_handles;
+    void*  sample_addr;
     double time_ms;
     long   result;
 } WorkerArgs;
 
 void* worker_shared (void* arg);
-void* worker_mutex  (void* arg);
 void* worker_tls    (void* arg);
 
 #endif ///__THREAD_SLAB_H__
-

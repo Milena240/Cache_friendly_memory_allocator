@@ -141,6 +141,8 @@ hp_slab_create(size_t obj_size, int capacity)
     for (int i = s->total_capacity - 1; i >= n_hot; i--)
         s->cold_free[s->cold_free_top++] = i;
 
+    s->epoch_size = HP_SLAB_EPOCH_SIZE;
+
     s->pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
 
     return s;
@@ -233,7 +235,7 @@ hp_slab_get(HpAwareSlab* s, HpSlabHandle h)
     m->cold_epochs = 0;
     s->epoch_accesses++;
 
-    if (s->epoch_accesses >= HP_SLAB_EPOCH_SIZE) {
+    if (s->epoch_accesses >= s->epoch_size) {
         hp_slab_epoch_check(s);
         gslot = s->handle_to_slot[h];
         if (gslot == HP_SLAB_INVALID) return NULL;
@@ -493,19 +495,23 @@ hp_slab_print_layout(HpAwareSlab* s, int show_n)
 {
     int cap = (show_n < s->total_capacity) ? show_n : s->total_capacity;
     printf("slot layout (first %d global slots):\n\n", cap);
-    printf("%-6s  %-8s  %-8s  %-12s  %-8s  %-12s\n",
-           "gslot", "handle", "region", "accesses", "cold_ep", "page_migr");
+    printf("%-6s  %-8s  %-8s\n",
+           "gslot", "handle", "region");
 
     for (int i = 0; i < cap; i++) {
+        /* print a separator between the hot and cold regions */
+        if (i == s->hot_capacity)
+            printf("--- cold region ---\n");
+        else if (i == 0)
+            printf("--- hot  region ---\n");
+
         HPSlotMeta* m = &s->meta[i];
         if (m->state == HP_FREE) {
             printf("%-6d  %-8s  %-8s\n", i, "free", "-");
             continue;
         }
         const char* reg = (m->region == HP_REGION_HOT) ? "HOT" : "cold";
-        printf("%-6d  %-8d  %-8s  %-12lld  %-8d  %-12d\n",
-               i, m->handle, reg,
-               m->access_count, m->cold_epochs, m->page_migrations);
+        printf("%-6d  %-8d  %-8s\n", i, m->handle, reg);
     }
     printf("\n");
 }

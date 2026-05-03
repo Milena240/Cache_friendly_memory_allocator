@@ -46,6 +46,7 @@ typedef struct {
     int        free_top;
 
     long long  epoch_accesses;
+    int        epoch_size;
     int        n_epochs;
     int        n_compactions;
 
